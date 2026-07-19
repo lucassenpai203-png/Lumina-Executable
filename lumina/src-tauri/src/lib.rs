@@ -1,6 +1,8 @@
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -28,15 +30,22 @@ struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
 }
 
-// ─── API Key persistence ──────────────────────────────────────────────────────
+// ─── Key persistence ──────────────────────────────────────────────────────────
 
-fn key_file_path() -> PathBuf {
+fn lumina_data_dir() -> PathBuf {
     let mut path = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."));
     path.push("Lumina");
     fs::create_dir_all(&path).ok();
-    path.push("api_key.txt");
     path
+}
+
+fn key_file_path() -> PathBuf {
+    lumina_data_dir().join("api_key.txt")
+}
+
+fn vtube_token_path() -> PathBuf {
+    lumina_data_dir().join("vtube_token.txt")
 }
 
 #[tauri::command]
@@ -50,6 +59,151 @@ fn get_api_key() -> Result<String, String> {
         Ok(key) => Ok(key.trim().to_string()),
         Err(_) => Ok(String::new()),
     }
+}
+
+#[tauri::command]
+fn save_vtube_token(token: String) -> Result<(), String> {
+    fs::write(vtube_token_path(), &token).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_vtube_token() -> Result<String, String> {
+    match fs::read_to_string(vtube_token_path()) {
+        Ok(t) => Ok(t.trim().to_string()),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+// ─── VTube Studio integration ─────────────────────────────────────────────────
+
+const VTS_PLUGIN_NAME: &str = "Lúmina AI";
+const VTS_PLUGIN_DEV: &str = "Lúmina";
+
+/// Opens a fresh WS connection to VTube Studio, sends one request, returns the response JSON.
+async fn vts_request(port: u16, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("ws://localhost:{}", port);
+    let (mut ws, _) = connect_async(&url)
+        .await
+        .map_err(|_| "No se pudo conectar con VTube Studio. ¿Está abierto y la API activada?".to_string())?;
+
+    ws.send(Message::Text(payload.to_string()))
+        .await
+        .map_err(|e| format!("Error al enviar: {}", e))?;
+
+    if let Some(Ok(Message::Text(text))) = ws.next().await {
+        serde_json::from_str(&text).map_err(|e| format!("Respuesta inválida: {}", e))
+    } else {
+        Err("VTube Studio no respondió".to_string())
+    }
+}
+
+/// Step 1 (one-time): ask VTube Studio to approve the plugin and return an auth token.
+/// VTube Studio will show a popup asking the user to allow the plugin.
+#[tauri::command]
+async fn vtube_request_token(port: u16) -> Result<String, String> {
+    let req = serde_json::json!({
+        "apiName": "VTubeStudioPublicAPI",
+        "apiVersion": "1.0",
+        "requestID": "lumina-token",
+        "messageType": "AuthenticationTokenRequest",
+        "data": {
+            "pluginName": VTS_PLUGIN_NAME,
+            "pluginDeveloper": VTS_PLUGIN_DEV,
+            "pluginIcon": null
+        }
+    });
+
+    let resp = vts_request(port, req).await?;
+
+    if let Some(token) = resp["data"]["authenticationToken"].as_str() {
+        Ok(token.to_string())
+    } else {
+        let msg = resp["data"]["message"].as_str().unwrap_or("Sin token");
+        Err(format!("VTube Studio: {}", msg))
+    }
+}
+
+/// Step 2+: authenticate and trigger the hotkey matching `lumina_<EMOTION>`.
+/// Call this every time the emotion changes.
+#[tauri::command]
+async fn vtube_trigger_emotion(emotion: String, token: String, port: u16) -> Result<(), String> {
+    let url = format!("ws://localhost:{}", port);
+    let (mut ws, _) = connect_async(&url)
+        .await
+        .map_err(|_| "VTube Studio desconectado".to_string())?;
+
+    // Authenticate
+    let auth_req = serde_json::json!({
+        "apiName": "VTubeStudioPublicAPI",
+        "apiVersion": "1.0",
+        "requestID": "lumina-auth",
+        "messageType": "AuthenticationRequest",
+        "data": {
+            "pluginName": VTS_PLUGIN_NAME,
+            "pluginDeveloper": VTS_PLUGIN_DEV,
+            "authenticationToken": token
+        }
+    });
+    ws.send(Message::Text(auth_req.to_string())).await.ok();
+    let auth_resp = if let Some(Ok(Message::Text(t))) = ws.next().await {
+        serde_json::from_str::<serde_json::Value>(&t).unwrap_or_default()
+    } else {
+        return Err("Sin respuesta de autenticación".to_string());
+    };
+    if auth_resp["data"]["authenticated"].as_bool() != Some(true) {
+        return Err("token_expired".to_string());
+    }
+
+    // Get hotkeys for current model
+    let hk_req = serde_json::json!({
+        "apiName": "VTubeStudioPublicAPI",
+        "apiVersion": "1.0",
+        "requestID": "lumina-hotkeys",
+        "messageType": "HotkeysInCurrentModelRequest",
+        "data": {}
+    });
+    ws.send(Message::Text(hk_req.to_string())).await.ok();
+    let hk_resp = if let Some(Ok(Message::Text(t))) = ws.next().await {
+        serde_json::from_str::<serde_json::Value>(&t).unwrap_or_default()
+    } else {
+        return Ok(()); // no hotkeys configured — skip silently
+    };
+
+    // Find hotkey named lumina_<EMOTION> (case-insensitive)
+    let target = format!("lumina_{}", emotion.to_uppercase());
+    let hotkeys = hk_resp["data"]["availableHotkeys"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let hotkey_id = hotkeys
+        .iter()
+        .find(|h| {
+            h["name"]
+                .as_str()
+                .map(|n| n.to_uppercase() == target)
+                .unwrap_or(false)
+        })
+        .and_then(|h| h["hotkeyID"].as_str())
+        .map(|s| s.to_string());
+
+    let id = match hotkey_id {
+        Some(id) => id,
+        None => return Ok(()), // hotkey not configured — skip silently
+    };
+
+    // Trigger it
+    let trigger_req = serde_json::json!({
+        "apiName": "VTubeStudioPublicAPI",
+        "apiVersion": "1.0",
+        "requestID": "lumina-trigger",
+        "messageType": "HotkeyTriggerRequest",
+        "data": { "hotkeyID": id }
+    });
+    ws.send(Message::Text(trigger_req.to_string())).await.ok();
+    let _ = ws.next().await;
+
+    Ok(())
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -157,7 +311,12 @@ async fn chat(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![chat, save_api_key, get_api_key])
+        .invoke_handler(tauri::generate_handler![
+            chat,
+            save_api_key, get_api_key,
+            save_vtube_token, get_vtube_token,
+            vtube_request_token, vtube_trigger_emotion
+        ])
         .run(tauri::generate_context!())
         .expect("Error al iniciar Lúmina");
 }

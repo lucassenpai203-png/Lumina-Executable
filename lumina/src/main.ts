@@ -13,6 +13,11 @@ let currentEmotion: Emotion = 'NEUTRAL';
 let isThinking = false;
 let apiKey = '';
 
+// VTube Studio state
+let vtubeToken = '';
+let vtubePort = 8001;
+let vtubeConnected = false;
+
 // ─── DOM refs ─────────────────────────────────────────────
 let messagesEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
@@ -41,6 +46,15 @@ async function init() {
   } catch {
     showModal();
   }
+
+  // Load saved VTube token
+  try {
+    const savedToken = await invoke<string>('get_vtube_token');
+    if (savedToken) {
+      vtubeToken = savedToken;
+      setVtubeStatus('connected');
+    }
+  } catch { /* ignore */ }
 }
 
 // ─── Render ───────────────────────────────────────────────
@@ -92,6 +106,12 @@ function renderApp() {
           <div class="emotion-dot" id="emotion-dot"></div>
           <span id="emotion-text">Tranquila</span>
         </div>
+
+        <!-- VTube Studio connector -->
+        <button class="vtube-btn" id="vtube-btn" title="Conectar con VTube Studio">
+          <span class="vtube-indicator" id="vtube-indicator"></span>
+          <span id="vtube-label">VTube Studio</span>
+        </button>
       </div>
 
       <!-- Chat Panel -->
@@ -138,9 +158,49 @@ function renderApp() {
   emotionDotEl = document.getElementById('emotion-dot')!;
 }
 
+// ─── VTube Studio ─────────────────────────────────────────
+function setVtubeStatus(status: 'disconnected' | 'connecting' | 'connected') {
+  const btn = document.getElementById('vtube-btn')!;
+  const indicator = document.getElementById('vtube-indicator')!;
+  const label = document.getElementById('vtube-label')!;
+  vtubeConnected = status === 'connected';
+  btn.dataset.status = status;
+  indicator.dataset.status = status;
+  if (status === 'connected') label.textContent = 'VTube ✓';
+  else if (status === 'connecting') label.textContent = 'Conectando...';
+  else label.textContent = 'VTube Studio';
+}
+
+async function handleVtubeClick() {
+  if (vtubeConnected) {
+    // Disconnect
+    vtubeToken = '';
+    await invoke('save_vtube_token', { token: '' }).catch(() => {});
+    setVtubeStatus('disconnected');
+    return;
+  }
+
+  setVtubeStatus('connecting');
+  try {
+    const token = await invoke<string>('vtube_request_token', { port: vtubePort });
+    vtubeToken = token;
+    await invoke('save_vtube_token', { token });
+    setVtubeStatus('connected');
+  } catch (err: unknown) {
+    setVtubeStatus('disconnected');
+    const msg = err instanceof Error ? err.message : String(err);
+    alert('VTube Studio: ' + msg + '\n\nAsegúrate de que:\n1. VTube Studio está abierto\n2. La API está activada (Settings → Plugins → Enable API)\n3. Puerto: 8001');
+  }
+}
+
 function bindEvents() {
   // Modal submit
   document.addEventListener('click', async (e) => {
+    if ((e.target as HTMLElement).id === 'vtube-btn' ||
+        (e.target as HTMLElement).closest('#vtube-btn')) {
+      handleVtubeClick();
+      return;
+    }
     if ((e.target as HTMLElement).id === 'modal-submit-btn') {
       const keyInput = document.getElementById('api-key-input') as HTMLInputElement;
       const key = keyInput.value.trim();
@@ -325,6 +385,22 @@ function setEmotion(emotion: Emotion) {
   // Update label
   const textEl = document.getElementById('emotion-text')!;
   textEl.textContent = label;
+
+  // Trigger VTube Studio if connected
+  if (vtubeConnected && vtubeToken) {
+    invoke('vtube_trigger_emotion', {
+      emotion,
+      token: vtubeToken,
+      port: vtubePort,
+    }).catch((err: unknown) => {
+      // If token expired, mark disconnected
+      const msg = String(err);
+      if (msg.includes('token_expired') || msg.includes('401')) {
+        vtubeToken = '';
+        setVtubeStatus('disconnected');
+      }
+    });
+  }
 }
 
 // ─── Particles ────────────────────────────────────────────
