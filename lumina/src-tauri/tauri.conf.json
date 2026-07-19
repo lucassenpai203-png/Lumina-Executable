@@ -4,7 +4,7 @@
   "productName": "Lúmina",
   "version": "0.1.0",
   "build": {
-    "beforeBuildCommand": "pnpm run build",
+    "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "pnpm run dev",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420"
