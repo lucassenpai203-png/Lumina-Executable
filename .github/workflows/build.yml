@@ -33,7 +33,7 @@ jobs:
 
       - name: Install frontend deps
         working-directory: lumina
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build app
         uses: tauri-apps/tauri-action@v0
@@ -76,7 +76,7 @@ jobs:
 
       - name: Install frontend deps
         working-directory: lumina
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build app
         uses: tauri-apps/tauri-action@v0
