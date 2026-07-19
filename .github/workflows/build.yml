@@ -41,6 +41,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: lumina
+          tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: "Lúmina v__VERSION__"
           releaseBody: |
@@ -84,6 +85,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: lumina
+          tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: "Lúmina v__VERSION__"
           releaseDraft: false
