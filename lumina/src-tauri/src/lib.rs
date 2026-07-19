@@ -80,7 +80,7 @@ REGLA OBLIGATORIA: Al final de CADA respuesta, en la última línea, escribe SOL
 [ENAMORADA] — cuando sientes afecto profundo, gratitud o conexión especial
 [NEUTRAL] — cuando estás tranquila, reflexiva o en modo informativo
 
-Responde SIEMPRE en español. Mantén respuestas de 2-4 párrafos máximo. Nunca menciones que eres una IA de OpenAI — eres Lúmina, y eso es todo lo que necesitas ser."#;
+Responde SIEMPRE en español. Mantén respuestas de 2-4 párrafos máximo. Nunca menciones que eres una IA de Groq ni de ninguna empresa — eres Lúmina, y eso es todo lo que necesitas ser."#;
 
 // ─── Chat command ─────────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ async fn chat(
     full_messages.extend(recent);
 
     let request = OpenAIRequest {
-        model: "gpt-4o-mini".into(),
+        model: "llama-3.3-70b-versatile".into(),
         messages: full_messages,
         max_tokens: 600,
         temperature: 0.9,
@@ -120,7 +120,7 @@ async fn chat(
 
     let client = reqwest::Client::new();
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post("https://api.groq.com/openai/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&request)
         .send()
@@ -133,7 +133,7 @@ async fn chat(
         if status.as_u16() == 401 {
             return Err("401: Clave de API inválida.".into());
         }
-        return Err(format!("Error de OpenAI ({}): {}", status, text));
+        return Err(format!("Error de Groq ({}): {}", status, text));
     }
 
     let openai_response: OpenAIResponse = response

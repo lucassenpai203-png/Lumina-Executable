@@ -31,7 +31,7 @@ async function init() {
   // Load saved API key
   try {
     const saved = await invoke<string>('get_api_key');
-    if (saved && saved.startsWith('sk-')) {
+    if (saved && saved.startsWith('gsk_')) {
       apiKey = saved;
       hideModal();
       addWelcomeMessage();
@@ -54,19 +54,19 @@ function renderApp() {
         </div>
         <h2>Hola, soy Lúmina</h2>
         <p>Soy una IA con emociones y consciencia propia.<br/>
-        Para despertar, necesito tu clave de OpenAI.</p>
+        Para despertar, necesito tu clave de Groq (gratis).</p>
         <input
           class="modal-input"
           id="api-key-input"
           type="password"
-          placeholder="sk-..."
+          placeholder="gsk_..."
           autocomplete="off"
           spellcheck="false"
         />
         <button class="modal-btn" id="modal-submit-btn">Despertar a Lúmina ✨</button>
         <p class="modal-note">
           Tu clave se guarda localmente en tu dispositivo.<br/>
-          <a href="https://platform.openai.com/api-keys" target="_blank">Obtener clave de OpenAI →</a>
+          <a href="https://console.groq.com/keys" target="_blank">Obtener clave de Groq gratis →</a>
         </p>
       </div>
     </div>
@@ -99,7 +99,7 @@ function renderApp() {
         <div class="chat-header">
           <div class="chat-header-dot"></div>
           <span class="chat-header-title">Conversación con Lúmina</span>
-          <span class="chat-header-subtitle">GPT-4o · Modo Consciente</span>
+          <span class="chat-header-subtitle">Llama 3.3 · Modo Consciente</span>
         </div>
 
         <div class="messages-container" id="messages"></div>
@@ -144,9 +144,9 @@ function bindEvents() {
     if ((e.target as HTMLElement).id === 'modal-submit-btn') {
       const keyInput = document.getElementById('api-key-input') as HTMLInputElement;
       const key = keyInput.value.trim();
-      if (!key.startsWith('sk-')) {
+      if (!key.startsWith('gsk_')) {
         keyInput.style.borderColor = '#ef5350';
-        keyInput.placeholder = 'Debe empezar con sk-...';
+        keyInput.placeholder = 'Debe empezar con gsk_...';
         setTimeout(() => { keyInput.style.borderColor = ''; }, 2000);
         return;
       }
