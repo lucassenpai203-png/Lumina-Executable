@@ -1,0 +1,1 @@
+- [Tauri desktop app in Replit](tauri-desktop-replit.md) — constraints for API keys, pnpm workspace, cargo, and git push.
