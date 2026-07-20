@@ -485,15 +485,17 @@ Responde SIEMPRE en español. Mantén respuestas de 2-4 párrafos máximo. Nunca
 async fn chat(
     messages: Vec<ChatMessage>,
     api_key: String,
+    system_prompt_override: Option<String>,
 ) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("No se ha configurado la clave de API.".into());
     }
 
     // Build the full message list with system prompt prepended
+    let system_content = system_prompt_override.unwrap_or_else(|| SYSTEM_PROMPT.into());
     let mut full_messages = vec![ChatMessage {
         role: "system".into(),
-        content: SYSTEM_PROMPT.into(),
+        content: system_content,
     }];
 
     // Keep last 20 messages to avoid exceeding context
@@ -548,6 +550,118 @@ async fn chat(
     Ok(content)
 }
 
+// ─── Tools: code/drawing files, web search, image generation ───────────────────
+
+#[tauri::command]
+fn save_lumina_file(subfolder: String, filename: String, content: String) -> Result<String, String> {
+    let mut dir = lumina_data_dir();
+    dir.push(subfolder);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    dir.push(&filename);
+    fs::write(&dir, &content).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn save_lumina_image(subfolder: String, filename: String, image_b64: String) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(image_b64)
+        .map_err(|e| format!("Imagen inválida: {}", e))?;
+    let mut dir = lumina_data_dir();
+    dir.push(subfolder);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    dir.push(&filename);
+    fs::write(&dir, &bytes).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+#[tauri::command]
+async fn search_web(query: String) -> Result<Vec<SearchResult>, String> {
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
+    let encoded = urlencoding::encode(&query);
+    let url = format!("https://html.duckduckgo.com/html/?q={}", encoded);
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("Error de red: {}", e))?;
+
+    let html = response.text().await.map_err(|e| e.to_string())?;
+    let document = scraper::Html::parse_document(&html);
+    let result_selector = scraper::Selector::parse(".result")
+        .map_err(|_| "Selector inválido")?;
+    let title_selector = scraper::Selector::parse(".result__title a")
+        .map_err(|_| "Selector inválido")?;
+    let snippet_selector = scraper::Selector::parse(".result__snippet")
+        .map_err(|_| "Selector inválido")?;
+    let url_selector = scraper::Selector::parse(".result__url")
+        .map_err(|_| "Selector inválido")?;
+
+    let mut results = vec![];
+    for result in document.select(&result_selector).take(5) {
+        let title = result
+            .select(&title_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        let url = result
+            .select(&url_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        let snippet = result
+            .select(&snippet_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        if !title.is_empty() {
+            results.push(SearchResult { title, url, snippet });
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+async fn download_image(url: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Error de red: {}", e))?;
+
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    Ok(STANDARD.encode(bytes))
+}
+
+#[tauri::command]
+async fn generate_image(prompt: String) -> Result<String, String> {
+    if prompt.is_empty() {
+        return Err("Prompt vacío".into());
+    }
+    let encoded = urlencoding::encode(&prompt);
+    let url = format!(
+        "https://image.pollinations.ai/prompt/{}?width=1024&height=1024&nologo=true&seed=42",
+        encoded
+    );
+    download_image(url).await
+}
+
 // ─── Run ──────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -561,7 +675,8 @@ pub fn run() {
             save_elevenlabs_key, get_elevenlabs_key,
             vtube_request_token, vtube_trigger_emotion,
             transcribe_audio, speak_text, list_elevenlabs_voices,
-            capture_screen, analyze_screen
+            capture_screen, analyze_screen,
+            save_lumina_file, save_lumina_image, search_web, download_image, generate_image
         ])
         .run(tauri::generate_context!())
         .expect("Error al iniciar Lúmina");

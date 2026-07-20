@@ -442,7 +442,7 @@ function renderApp() {
               <textarea
                 class="message-input"
                 id="message-input"
-                placeholder="Escríbele o habla a Lúmina..."
+                placeholder="Escribe, habla, o usa /code /dibujar /buscar /imagen..."
                 rows="1"
                 maxlength="2000"
               ></textarea>
@@ -659,6 +659,198 @@ function addWelcomeMessage() {
   }, 800);
 }
 
+// ─── Tool prompts ─────────────────────────────────────────
+const CODE_PROMPT = `Eres un experto programador. El usuario te pide código. Responde SOLO con el código solicitado, envuelto en un bloque markdown. No añadas explicaciones, saludos ni emociones.`;
+
+const DRAW_PROMPT = `Eres un experto diseñador SVG. El usuario te pide un dibujo. Responde SOLO con el código SVG completo y válido, envuelto en un bloque markdown. No añadas explicaciones, saludos ni emociones.`;
+
+// ─── Slash commands ─────────────────────────────────────────
+function parseSlashCommand(text: string): { command: string; args: string } | null {
+  const match = text.match(/^\/(code|programar|draw|dibujar|search|buscar|imagen|image)\s*(.*)/i);
+  if (!match) return null;
+  return { command: match[1].toLowerCase(), args: match[2].trim() };
+}
+
+function extractCodeBlock(text: string, lang?: string): string | null {
+  const regex = lang
+    ? new RegExp(`\\\`\\\`\\\`(?:${lang})?\\s*\\n?([\\s\\S]*?)\\n?\\\`\\\`\\\``)
+    : /```(?:\w+)?\s*\n?([\s\S]*?)\n?```/;
+  const match = text.match(regex);
+  return match ? match[1].trim() : null;
+}
+
+function guessCodeExtension(code: string): string {
+  if (code.includes('fn main') || code.includes('use std::')) return 'rs';
+  if (code.includes('import ')) return 'py';
+  if (code.includes('function') && code.includes('console.log')) return 'js';
+  if (code.includes('<html') || code.includes('<!DOCTYPE html')) return 'html';
+  if (code.includes('public class') || code.includes('class Main')) return 'java';
+  if (code.includes('package main') || code.includes('fmt.')) return 'go';
+  return 'txt';
+}
+
+async function handleSlashCommand(slash: { command: string; args: string }) {
+  switch (slash.command) {
+    case 'code':
+    case 'programar':
+      await handleCodeCommand(slash.args);
+      break;
+    case 'draw':
+    case 'dibujar':
+      await handleDrawCommand(slash.args);
+      break;
+    case 'search':
+    case 'buscar':
+      await handleSearchCommand(slash.args);
+      break;
+    case 'imagen':
+    case 'image':
+      await handleImageCommand(slash.args);
+      break;
+  }
+}
+
+async function handleCodeCommand(args: string) {
+  if (!args) {
+    appendMessage('lumina', 'Dime qué quieres que programe. Ejemplo: `/code una calculadora en Python`.');
+    return;
+  }
+  appendMessage('user', `Programa: ${args}`);
+  const typingId = showTyping();
+  try {
+    const response = await invoke<string>('chat', {
+      messages: [{ role: 'user', content: args }],
+      apiKey,
+      systemPromptOverride: CODE_PROMPT,
+    });
+    removeTyping(typingId);
+    const code = extractCodeBlock(response) || cleanResponse(response);
+    const ext = guessCodeExtension(code);
+    const filename = `code_${Date.now()}.${ext}`;
+    const path = await invoke<string>('save_lumina_file', {
+      subfolder: 'code',
+      filename,
+      content: code,
+    });
+    const preview = code.length > 250 ? code.slice(0, 250) + '...' : code;
+    appendHtmlMessage('lumina', `He guardado el código en:\n${path}\n\n\`\`\`${preview}\`\`\``, '');
+    setEmotion('CURIOSA');
+  } catch (err: unknown) {
+    removeTyping(typingId);
+    appendMessage('lumina', 'No pude generar el código. ¿Tienes clave de Groq activa?');
+    setEmotion('TRISTE');
+  }
+}
+
+async function handleDrawCommand(args: string) {
+  if (!args) {
+    appendMessage('lumina', 'Dime qué quieres que dibuje. Ejemplo: `/dibujar un robot anime`.');
+    return;
+  }
+  appendMessage('user', `Dibujo: ${args}`);
+  const typingId = showTyping();
+  try {
+    const response = await invoke<string>('chat', {
+      messages: [{ role: 'user', content: args }],
+      apiKey,
+      systemPromptOverride: DRAW_PROMPT,
+    });
+    removeTyping(typingId);
+    const svg = extractCodeBlock(response, 'svg') || extractCodeBlock(response) || cleanResponse(response);
+    const filename = `drawing_${Date.now()}.svg`;
+    const path = await invoke<string>('save_lumina_file', {
+      subfolder: 'drawings',
+      filename,
+      content: svg,
+    });
+    appendHtmlMessage('lumina', `He guardado el dibujo SVG en:\n${path}`, `<div class="tool-svg">${svg}</div>`);
+    setEmotion('SORPRENDIDA');
+  } catch (err: unknown) {
+    removeTyping(typingId);
+    appendMessage('lumina', 'No pude generar el dibujo. ¿Tienes clave de Groq activa?');
+    setEmotion('TRISTE');
+  }
+}
+
+async function handleSearchCommand(args: string) {
+  if (!args) {
+    appendMessage('lumina', 'Dime qué quieres buscar. Ejemplo: `/buscar recetas de pasta`.');
+    return;
+  }
+  appendMessage('user', `Buscar: ${args}`);
+  const typingId = showTyping();
+  try {
+    const results = await invoke<Array<{ title: string; url: string; snippet: string }>>('search_web', { query: args });
+    removeTyping(typingId);
+    if (!results.length) {
+      appendMessage('lumina', 'No encontré resultados. Intenta con otra búsqueda.');
+      setEmotion('TRISTE');
+      return;
+    }
+    let html = '<div class="search-results">';
+    for (const r of results) {
+      const safeTitle = r.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const safeUrl = r.url.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const safeSnippet = r.snippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      html += `<a class="search-result" href="${safeUrl}" target="_blank"><div class="search-title">${safeTitle}</div><div class="search-url">${safeUrl}</div><div class="search-snippet">${safeSnippet}</div></a>`;
+    }
+    html += '</div>';
+    appendHtmlMessage('lumina', 'Encontré esto en la web:', html);
+    setEmotion('CURIOSA');
+  } catch (err: unknown) {
+    removeTyping(typingId);
+    appendMessage('lumina', 'No pude buscar en la web. DuckDuckGo puede estar bloqueando la petición.');
+    setEmotion('TRISTE');
+  }
+}
+
+async function handleImageCommand(args: string) {
+  if (!args) {
+    appendMessage('lumina', 'Dime qué imagen quieres. Ejemplo: `/imagen un gato cyberpunk`.');
+    return;
+  }
+  appendMessage('user', `Imagen: ${args}`);
+  const typingId = showTyping();
+  try {
+    const b64 = await invoke<string>('generate_image', { prompt: args });
+    const filename = `image_${Date.now()}.png`;
+    const path = await invoke<string>('save_lumina_image', {
+      subfolder: 'images',
+      filename,
+      imageB64: b64,
+    });
+    removeTyping(typingId);
+    appendHtmlMessage('lumina', `He generado esta imagen y la guardé en:\n${path}`, `<img class="tool-image" src="data:image/png;base64,${b64}" alt="Imagen generada" />`);
+    setEmotion('SORPRENDIDA');
+  } catch (err: unknown) {
+    removeTyping(typingId);
+    appendMessage('lumina', 'No pude generar la imagen. Inténtalo con otra descripción.');
+    setEmotion('TRISTE');
+  }
+}
+
+function appendHtmlMessage(role: 'user' | 'lumina', text: string, html: string) {
+  const msgEl = document.createElement('div');
+  msgEl.className = `message ${role}`;
+  const avatar = role === 'user'
+    ? `<div class="message-avatar">👤</div>`
+    : `<div class="message-avatar" style="font-size:18px">✨</div>`;
+  const escapedText = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br/>');
+  msgEl.innerHTML = `
+    ${avatar}
+    <div class="message-bubble">
+      <div class="tool-text">${escapedText}</div>
+      ${html}
+    </div>
+  `;
+  messagesEl.appendChild(msgEl);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 // ─── Send Message ─────────────────────────────────────────
 async function handleSend(forcedText?: string) {
   const text = (forcedText ?? inputEl.value).trim();
@@ -667,6 +859,13 @@ async function handleSend(forcedText?: string) {
   inputEl.value = '';
   inputEl.style.height = 'auto';
   setThinking(true);
+
+  const slash = parseSlashCommand(text);
+  if (slash) {
+    await handleSlashCommand(slash);
+    setThinking(false);
+    return;
+  }
 
   // Add user message
   appendMessage('user', text);
@@ -679,6 +878,7 @@ async function handleSend(forcedText?: string) {
     const response = await invoke<string>('chat', {
       messages: buildMessagesWithScreenContext().map(m => ({ role: m.role, content: m.content })),
       apiKey,
+      systemPromptOverride: null,
     });
 
     removeTyping(typingId);

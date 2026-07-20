@@ -770,6 +770,73 @@ body {
   color: #ef5350;
 }
 
+/* ─── TOOL RESULTS ───────────────────────────────────── */
+.tool-text {
+  white-space: pre-wrap;
+  margin-bottom: 10px;
+}
+
+.tool-image {
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(157, 78, 221, 0.2);
+}
+
+.tool-svg {
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(157, 78, 221, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 8px;
+}
+
+.tool-svg svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.search-result {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(30, 15, 55, 0.5);
+  border: 1px solid rgba(157, 78, 221, 0.15);
+  text-decoration: none;
+  transition: background 0.2s ease;
+}
+
+.search-result:hover {
+  background: rgba(157, 78, 221, 0.15);
+}
+
+.search-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #c8aaff;
+  margin-bottom: 2px;
+}
+
+.search-url {
+  font-size: 10px;
+  color: rgba(168, 156, 200, 0.5);
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.search-snippet {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 /* ─── SCREEN WATCH ───────────────────────────────────── */
 .screen-btn {
   display: flex;
