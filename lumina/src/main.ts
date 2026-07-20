@@ -8,8 +8,8 @@ interface ChatMessage {
   content: string;
 }
 
-interface VoicevoxSpeaker {
-  id: number;
+interface EdgeVoice {
+  id: string;
   name: string;
 }
 
@@ -17,8 +17,8 @@ let messages: ChatMessage[] = [];
 let currentEmotion: Emotion = 'NEUTRAL';
 let isThinking = false;
 let apiKey = '';
-let selectedSpeakerId = 0;
-let voicevoxSpeakers: VoicevoxSpeaker[] = [];
+let selectedVoiceId = '';
+let edgeVoices: EdgeVoice[] = [];
 let autoSpeak = true;
 let isRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
@@ -82,17 +82,17 @@ async function init() {
     }
   } catch { /* ignore */ }
 
-  // Load VoiceVox speakers
+  // Load Edge voices
   try {
-    await loadVoicevoxSpeakers();
+    await loadEdgeVoices();
   } catch { /* ignore */ }
 }
 
-// ─── VoiceVox speakers ─────────────────────────────────────
-async function loadVoicevoxSpeakers() {
+// ─── Edge voices ──────────────────────────────────────────
+async function loadEdgeVoices() {
   try {
-    const speakers = await invoke<VoicevoxSpeaker[]>('list_voicevox_speakers');
-    voicevoxSpeakers = speakers;
+    const voices = await invoke<EdgeVoice[]>('list_edge_voices');
+    edgeVoices = voices;
     populateVoiceSelect();
   } catch { /* ignore */ }
 }
@@ -100,21 +100,19 @@ async function loadVoicevoxSpeakers() {
 function populateVoiceSelect() {
   if (!voiceSelectEl) return;
   voiceSelectEl.innerHTML = '';
-  for (const s of voicevoxSpeakers) {
+  for (const v of edgeVoices) {
     const opt = document.createElement('option');
-    opt.value = String(s.id);
-    opt.textContent = s.name;
+    opt.value = v.id;
+    opt.textContent = v.name;
     voiceSelectEl.appendChild(opt);
   }
-  if (voicevoxSpeakers.length) {
-    const preferred = voicevoxSpeakers.find(s =>
-      /めたん|つむぎ|はう|うさぎ|タイプＴ/i.test(s.name)
-    );
-    selectedSpeakerId = preferred ? preferred.id : voicevoxSpeakers[0].id;
-    voiceSelectEl.value = String(selectedSpeakerId);
+  if (edgeVoices.length) {
+    const preferred = edgeVoices.find(v => v.id === 'es-MX-DaliaNeural');
+    selectedVoiceId = preferred ? preferred.id : edgeVoices[0].id;
+    voiceSelectEl.value = selectedVoiceId;
   }
   const section = document.getElementById('voice-section');
-  if (section) section.style.display = voicevoxSpeakers.length ? 'block' : 'block';
+  if (section) section.style.display = 'block';
 }
 
 // ─── Voice recording ───────────────────────────────────────
@@ -198,15 +196,15 @@ async function processVoiceBlob(blob: Blob) {
 
 // ─── Text to Speech ────────────────────────────────────────
 async function speak(text: string) {
-  if (!autoSpeak || !text) return;
+  if (!autoSpeak || !text || !selectedVoiceId) return;
   try {
-    const b64 = await invoke<string>('speak_voicevox', {
+    const b64 = await invoke<string>('speak_edge', {
       text,
-      speakerId: selectedSpeakerId,
+      voiceId: selectedVoiceId,
     });
     if (!b64) return;
     stopCurrentAudio();
-    currentAudio = new Audio(`data:audio/wav;base64,${b64}`);
+    currentAudio = new Audio(`data:audio/mpeg;base64,${b64}`);
     currentAudio.play().catch(() => {});
   } catch (err) {
     console.error('TTS error:', err);
@@ -348,9 +346,9 @@ function renderApp() {
         </div>
 
         <div class="modal-section" id="voice-section">
-          <label class="modal-label">Voz de Lúmina (VoiceVox)</label>
+          <label class="modal-label">Voz de Lúmina</label>
           <select class="modal-select" id="voice-select"></select>
-          <p class="modal-hint">Requiere <a href="https://voicevox.hiroshiba.jp/" target="_blank">VoiceVox</a> abierto en tu PC.</p>
+          <p class="modal-hint">Voz gratuita e ilimitada de Microsoft Edge.</p>
           <label class="modal-row">
             <input type="checkbox" id="auto-speak" checked />
             <span>Hablar automáticamente</span>
@@ -358,7 +356,7 @@ function renderApp() {
         </div>
 
         <button class="modal-btn" id="modal-submit-btn">Despertar a Lúmina ✨</button>
-        <p class="modal-note">Tu clave de Groq se guarda localmente. VoiceVox funciona en tu PC sin clave.</p>
+        <p class="modal-note">Tu clave de Groq se guarda localmente. La voz no necesita clave.</p>
       </div>
     </div>
 
@@ -420,7 +418,7 @@ function renderApp() {
               <textarea
                 class="message-input"
                 id="message-input"
-                placeholder="Escribe, habla, o usa /code /dibujar /buscar /imagen..."
+                placeholder="Escríbele o habla a Lúmina... o usa /code /dibujar /buscar /imagen"
                 rows="1"
                 maxlength="2000"
               ></textarea>
@@ -531,7 +529,7 @@ function bindEvents() {
   // Voice selector change
   document.addEventListener('change', (e) => {
     if ((e.target as HTMLElement).id === 'voice-select') {
-      selectedSpeakerId = Number((e.target as HTMLSelectElement).value);
+      selectedVoiceId = (e.target as HTMLSelectElement).value;
     }
     if ((e.target as HTMLElement).id === 'auto-speak') {
       autoSpeak = (e.target as HTMLInputElement).checked;
@@ -595,7 +593,7 @@ async function saveSettingsFromModal() {
   apiKey = key;
   await invoke('save_api_key', { key });
 
-  selectedSpeakerId = Number(voiceSelectEl?.value) || selectedSpeakerId;
+  selectedVoiceId = voiceSelectEl?.value || selectedVoiceId;
   autoSpeak = (document.getElementById('auto-speak') as HTMLInputElement)?.checked ?? true;
 
   const overlay = document.getElementById('modal-overlay')!;
@@ -619,8 +617,8 @@ function addWelcomeMessage() {
 
   // Auto first greeting
   setTimeout(() => {
-    appendMessage('lumina', 'こんにちは… ルミナです。今日はどんな一日ですか？');
-    messages.push({ role: 'assistant', content: 'こんにちは… ルミナです。今日はどんな一日ですか？' });
+    appendMessage('lumina', 'Hola... estoy aquí. ¿Cómo estás hoy?');
+    messages.push({ role: 'assistant', content: 'Hola... estoy aquí. ¿Cómo estás hoy?' });
     setEmotion('CURIOSA');
   }, 800);
 }
