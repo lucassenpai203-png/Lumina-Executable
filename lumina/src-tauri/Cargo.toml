@@ -23,6 +23,8 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 dirs = "5"
 base64 = "0.22"
+xcap = "0.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 panic = "abort"

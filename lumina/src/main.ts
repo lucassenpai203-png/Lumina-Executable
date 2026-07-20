@@ -4,7 +4,7 @@ import './style.css';
 
 // ─── State ───────────────────────────────────────────────
 interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
@@ -26,6 +26,13 @@ let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
 let currentAudio: HTMLAudioElement | null = null;
 
+// Screen watch state
+let screenWatching = false;
+let screenWatchInterval: number | null = null;
+let screenContext = '';
+let lastScreenDescription = '';
+let screenPreviewUrl = '';
+
 // VTube Studio state
 let vtubeToken = '';
 let vtubePort = 8001;
@@ -43,6 +50,10 @@ let emotionDotEl: HTMLElement;
 let voiceSelectEl: HTMLSelectElement;
 let apiKeyInputEl: HTMLInputElement;
 let elevenlabsInputEl: HTMLInputElement;
+let screenBtnEl: HTMLButtonElement;
+let screenPreviewEl: HTMLElement;
+let screenPreviewImgEl: HTMLImageElement;
+let screenPreviewTextEl: HTMLElement;
 
 // ─── App Init ─────────────────────────────────────────────
 async function init() {
@@ -220,6 +231,106 @@ function stopCurrentAudio() {
   }
 }
 
+// ─── Screen watch ─────────────────────────────────────────
+function setScreenStatus(watching: boolean) {
+  screenWatching = watching;
+  screenBtnEl.dataset.status = watching ? 'watching' : 'idle';
+  const indicator = document.getElementById('screen-indicator')!;
+  const label = document.getElementById('screen-label')!;
+  indicator.dataset.status = watching ? 'watching' : 'idle';
+  label.textContent = watching ? 'Viendo...' : 'Ver pantalla';
+  screenPreviewEl.style.display = watching ? 'block' : 'none';
+  if (!watching) {
+    screenContext = '';
+    lastScreenDescription = '';
+    if (screenPreviewUrl) {
+      URL.revokeObjectURL(screenPreviewUrl);
+      screenPreviewUrl = '';
+    }
+    screenPreviewImgEl.src = '';
+  }
+}
+
+async function toggleScreenWatch() {
+  if (screenWatching) {
+    stopScreenWatch();
+    return;
+  }
+  if (!apiKey) {
+    alert('Necesitas una clave de Groq para que Lúmina vea tu pantalla.');
+    return;
+  }
+  startScreenWatch();
+}
+
+function startScreenWatch() {
+  setScreenStatus(true);
+  watchScreenOnce(); // first capture immediately
+  screenWatchInterval = window.setInterval(watchScreenOnce, 8000);
+}
+
+function stopScreenWatch() {
+  if (screenWatchInterval) {
+    clearInterval(screenWatchInterval);
+    screenWatchInterval = null;
+  }
+  setScreenStatus(false);
+}
+
+async function watchScreenOnce() {
+  if (!screenWatching || !apiKey) return;
+  try {
+    const b64 = await invoke<string>('capture_screen');
+    if (!b64) return;
+
+    // Show preview
+    const blob = await fetch(`data:image/png;base64,${b64}`).then(r => r.blob());
+    if (screenPreviewUrl) URL.revokeObjectURL(screenPreviewUrl);
+    screenPreviewUrl = URL.createObjectURL(blob);
+    screenPreviewImgEl.src = screenPreviewUrl;
+
+    // Analyze
+    screenPreviewTextEl.textContent = 'Analizando...';
+    const analysis = await invoke<string>('analyze_screen', {
+      imageB64: b64,
+      apiKey,
+    });
+    const emotion = parseEmotion(analysis);
+    const description = cleanResponse(analysis);
+
+    screenContext = description;
+    screenPreviewTextEl.textContent = description || 'Observando...';
+
+    // If description changed a lot, Lúmina may react proactively
+    if (description && description !== lastScreenDescription) {
+      lastScreenDescription = description;
+      const changed = !description || (lastScreenDescription && !description.includes(lastScreenDescription.substring(0, 20)));
+      if (changed && messages.length > 0) {
+        // Only react proactively every few changes to avoid spam
+        // For now, we update the context silently; user can ask about it
+      }
+    }
+
+    setEmotion(emotion);
+  } catch (err) {
+    console.error('Screen watch error:', err);
+    screenPreviewTextEl.textContent = 'No se pudo analizar la pantalla.';
+  }
+}
+
+function buildMessagesWithScreenContext(): ChatMessage[] {
+  const filtered = messages.filter(
+    m => !m.content.startsWith('[Lúmina está observando tu pantalla')
+  );
+  if (screenContext) {
+    filtered.push({
+      role: 'system',
+      content: `[Lúmina está observando tu pantalla: ${screenContext}]`,
+    });
+  }
+  return filtered;
+}
+
 // ─── Render ───────────────────────────────────────────────
 function renderApp() {
   document.getElementById('app')!.innerHTML = `
@@ -300,6 +411,16 @@ function renderApp() {
           <span class="vtube-indicator" id="vtube-indicator"></span>
           <span id="vtube-label">VTube Studio</span>
         </button>
+
+        <!-- Screen watch -->
+        <button class="screen-btn" id="screen-btn" title="Ver mi pantalla">
+          <span class="screen-indicator" id="screen-indicator"></span>
+          <span id="screen-label">Ver pantalla</span>
+        </button>
+        <div class="screen-preview" id="screen-preview" style="display:none">
+          <img id="screen-preview-img" alt="Vista de pantalla" />
+          <div class="screen-preview-text" id="screen-preview-text">Observando...</div>
+        </div>
       </div>
 
       <!-- Chat Panel -->
@@ -360,6 +481,10 @@ function renderApp() {
   voiceSelectEl = document.getElementById('voice-select') as HTMLSelectElement;
   apiKeyInputEl = document.getElementById('api-key-input') as HTMLInputElement;
   elevenlabsInputEl = document.getElementById('elevenlabs-key-input') as HTMLInputElement;
+  screenBtnEl = document.getElementById('screen-btn') as HTMLButtonElement;
+  screenPreviewEl = document.getElementById('screen-preview')!;
+  screenPreviewImgEl = document.getElementById('screen-preview-img') as HTMLImageElement;
+  screenPreviewTextEl = document.getElementById('screen-preview-text')!;
 }
 
 // ─── VTube Studio ─────────────────────────────────────────
@@ -414,6 +539,11 @@ function bindEvents() {
         (e.target as HTMLElement).closest('#mic-btn')) {
       if (isRecording) stopRecording();
       else startRecording();
+      return;
+    }
+    if ((e.target as HTMLElement).id === 'screen-btn' ||
+        (e.target as HTMLElement).closest('#screen-btn')) {
+      toggleScreenWatch();
       return;
     }
     if ((e.target as HTMLElement).id === 'modal-submit-btn') {
@@ -547,7 +677,7 @@ async function handleSend(forcedText?: string) {
 
   try {
     const response = await invoke<string>('chat', {
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      messages: buildMessagesWithScreenContext().map(m => ({ role: m.role, content: m.content })),
       apiKey,
     });
 
