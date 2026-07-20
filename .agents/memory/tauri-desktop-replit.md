@@ -5,6 +5,8 @@ description: Constraints and patterns when building a Tauri v2 desktop app insid
 
 **Rule:** Replit integrations (ElevenLabs, etc.) cannot be used inside a Tauri Windows `.exe` because the app runs on the user's machine, not on Replit's cloud. Always ask the user for their own API keys and store them locally in the app.
 
+**Rule:** For free, unlimited, Japanese anime-style TTS in a desktop app, use **VoiceVox** (local engine, port 50021). It is the standard for VTuber/anime voices in Japanese and has no cloud limits. The trade-off is the user must install and run the VoiceVox engine locally.
+
 **Rule:** The `lumina/` directory is not part of the pnpm workspace (`pnpm-workspace.yaml` only lists `artifacts/*`, `lib/*`, `scripts`). Install its dependencies with:
 
 ```bash
