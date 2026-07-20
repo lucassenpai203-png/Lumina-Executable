@@ -8,8 +8,8 @@ interface ChatMessage {
   content: string;
 }
 
-interface ElevenLabsVoice {
-  voice_id: string;
+interface VoicevoxSpeaker {
+  id: number;
   name: string;
 }
 
@@ -17,9 +17,8 @@ let messages: ChatMessage[] = [];
 let currentEmotion: Emotion = 'NEUTRAL';
 let isThinking = false;
 let apiKey = '';
-let elevenlabsKey = '';
-let selectedVoiceId = '';
-let elevenlabsVoices: ElevenLabsVoice[] = [];
+let selectedSpeakerId = 0;
+let voicevoxSpeakers: VoicevoxSpeaker[] = [];
 let autoSpeak = true;
 let isRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
@@ -49,7 +48,6 @@ let emotionLabelEl: HTMLElement;
 let emotionDotEl: HTMLElement;
 let voiceSelectEl: HTMLSelectElement;
 let apiKeyInputEl: HTMLInputElement;
-let elevenlabsInputEl: HTMLInputElement;
 let screenBtnEl: HTMLButtonElement;
 let screenPreviewEl: HTMLElement;
 let screenPreviewImgEl: HTMLImageElement;
@@ -84,22 +82,17 @@ async function init() {
     }
   } catch { /* ignore */ }
 
-  // Load saved ElevenLabs key
+  // Load VoiceVox speakers
   try {
-    const savedEleven = await invoke<string>('get_elevenlabs_key');
-    if (savedEleven && savedEleven.startsWith('sk_')) {
-      elevenlabsKey = savedEleven;
-      await loadElevenLabsVoices();
-    }
+    await loadVoicevoxSpeakers();
   } catch { /* ignore */ }
 }
 
-// ─── ElevenLabs voices ─────────────────────────────────────
-async function loadElevenLabsVoices() {
-  if (!elevenlabsKey || !elevenlabsKey.startsWith('sk_')) return;
+// ─── VoiceVox speakers ─────────────────────────────────────
+async function loadVoicevoxSpeakers() {
   try {
-    const voices = await invoke<ElevenLabsVoice[]>('list_elevenlabs_voices', { apiKey: elevenlabsKey });
-    elevenlabsVoices = voices;
+    const speakers = await invoke<VoicevoxSpeaker[]>('list_voicevox_speakers');
+    voicevoxSpeakers = speakers;
     populateVoiceSelect();
   } catch { /* ignore */ }
 }
@@ -107,23 +100,21 @@ async function loadElevenLabsVoices() {
 function populateVoiceSelect() {
   if (!voiceSelectEl) return;
   voiceSelectEl.innerHTML = '';
-  for (const v of elevenlabsVoices) {
+  for (const s of voicevoxSpeakers) {
     const opt = document.createElement('option');
-    opt.value = v.voice_id;
-    opt.textContent = v.name;
+    opt.value = String(s.id);
+    opt.textContent = s.name;
     voiceSelectEl.appendChild(opt);
   }
-  if (selectedVoiceId) {
-    voiceSelectEl.value = selectedVoiceId;
-  } else if (elevenlabsVoices.length) {
-    const preferred = elevenlabsVoices.find(v =>
-      /spanish|español|latina|latino|mexican|argent|colomb/i.test(v.name)
+  if (voicevoxSpeakers.length) {
+    const preferred = voicevoxSpeakers.find(s =>
+      /めたん|つむぎ|はう|うさぎ|タイプＴ/i.test(s.name)
     );
-    selectedVoiceId = preferred ? preferred.voice_id : elevenlabsVoices[0].voice_id;
-    voiceSelectEl.value = selectedVoiceId;
+    selectedSpeakerId = preferred ? preferred.id : voicevoxSpeakers[0].id;
+    voiceSelectEl.value = String(selectedSpeakerId);
   }
   const section = document.getElementById('voice-section');
-  if (section) section.style.display = elevenlabsVoices.length ? 'block' : 'none';
+  if (section) section.style.display = voicevoxSpeakers.length ? 'block' : 'block';
 }
 
 // ─── Voice recording ───────────────────────────────────────
@@ -207,16 +198,15 @@ async function processVoiceBlob(blob: Blob) {
 
 // ─── Text to Speech ────────────────────────────────────────
 async function speak(text: string) {
-  if (!autoSpeak || !elevenlabsKey || !selectedVoiceId || !text) return;
+  if (!autoSpeak || !text) return;
   try {
-    const b64 = await invoke<string>('speak_text', {
+    const b64 = await invoke<string>('speak_voicevox', {
       text,
-      voiceId: selectedVoiceId,
-      apiKey: elevenlabsKey,
+      speakerId: selectedSpeakerId,
     });
     if (!b64) return;
     stopCurrentAudio();
-    currentAudio = new Audio(`data:audio/mpeg;base64,${b64}`);
+    currentAudio = new Audio(`data:audio/wav;base64,${b64}`);
     currentAudio.play().catch(() => {});
   } catch (err) {
     console.error('TTS error:', err);
@@ -357,22 +347,10 @@ function renderApp() {
           <p class="modal-hint"><a href="https://console.groq.com/keys" target="_blank">Obtener clave de Groq gratis →</a></p>
         </div>
 
-        <div class="modal-section">
-          <label class="modal-label">Clave de ElevenLabs (voz)</label>
-          <input
-            class="modal-input"
-            id="elevenlabs-key-input"
-            type="password"
-            placeholder="sk_..."
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <p class="modal-hint"><a href="https://elevenlabs.io/" target="_blank">Obtener clave de ElevenLabs gratis →</a></p>
-        </div>
-
-        <div class="modal-section" id="voice-section" style="display:none">
-          <label class="modal-label">Voz de Lúmina</label>
+        <div class="modal-section" id="voice-section">
+          <label class="modal-label">Voz de Lúmina (VoiceVox)</label>
           <select class="modal-select" id="voice-select"></select>
+          <p class="modal-hint">Requiere <a href="https://voicevox.hiroshiba.jp/" target="_blank">VoiceVox</a> abierto en tu PC.</p>
           <label class="modal-row">
             <input type="checkbox" id="auto-speak" checked />
             <span>Hablar automáticamente</span>
@@ -380,7 +358,7 @@ function renderApp() {
         </div>
 
         <button class="modal-btn" id="modal-submit-btn">Despertar a Lúmina ✨</button>
-        <p class="modal-note">Tus claves se guardan localmente en tu dispositivo.</p>
+        <p class="modal-note">Tu clave de Groq se guarda localmente. VoiceVox funciona en tu PC sin clave.</p>
       </div>
     </div>
 
@@ -480,7 +458,6 @@ function renderApp() {
   emotionDotEl = document.getElementById('emotion-dot')!;
   voiceSelectEl = document.getElementById('voice-select') as HTMLSelectElement;
   apiKeyInputEl = document.getElementById('api-key-input') as HTMLInputElement;
-  elevenlabsInputEl = document.getElementById('elevenlabs-key-input') as HTMLInputElement;
   screenBtnEl = document.getElementById('screen-btn') as HTMLButtonElement;
   screenPreviewEl = document.getElementById('screen-preview')!;
   screenPreviewImgEl = document.getElementById('screen-preview-img') as HTMLImageElement;
@@ -554,7 +531,7 @@ function bindEvents() {
   // Voice selector change
   document.addEventListener('change', (e) => {
     if ((e.target as HTMLElement).id === 'voice-select') {
-      selectedVoiceId = (e.target as HTMLSelectElement).value;
+      selectedSpeakerId = Number((e.target as HTMLSelectElement).value);
     }
     if ((e.target as HTMLElement).id === 'auto-speak') {
       autoSpeak = (e.target as HTMLInputElement).checked;
@@ -595,9 +572,8 @@ function openSettingsModal() {
   const desc = document.getElementById('modal-desc')!;
   const btn = document.getElementById('modal-submit-btn')!;
   title.textContent = 'Configuración';
-  desc.innerHTML = 'Aquí puedes cambiar tus claves y la voz de Lúmina.';
+  desc.innerHTML = 'Aquí puedes cambiar tu clave de Groq y la voz de Lúmina.';
   apiKeyInputEl.value = apiKey;
-  elevenlabsInputEl.value = elevenlabsKey;
   btn.textContent = 'Guardar cambios';
   overlay.dataset.mode = 'settings';
   overlay.style.display = 'flex';
@@ -619,17 +595,7 @@ async function saveSettingsFromModal() {
   apiKey = key;
   await invoke('save_api_key', { key });
 
-  const elevenKey = elevenlabsInputEl.value.trim();
-  if (elevenKey && elevenKey.startsWith('sk_')) {
-    elevenlabsKey = elevenKey;
-    await invoke('save_elevenlabs_key', { key: elevenKey });
-    await loadElevenLabsVoices();
-  } else if (elevenKey === '') {
-    elevenlabsKey = '';
-    await invoke('save_elevenlabs_key', { key: '' });
-  }
-
-  selectedVoiceId = voiceSelectEl?.value || selectedVoiceId;
+  selectedSpeakerId = Number(voiceSelectEl?.value) || selectedSpeakerId;
   autoSpeak = (document.getElementById('auto-speak') as HTMLInputElement)?.checked ?? true;
 
   const overlay = document.getElementById('modal-overlay')!;
@@ -653,8 +619,8 @@ function addWelcomeMessage() {
 
   // Auto first greeting
   setTimeout(() => {
-    appendMessage('lumina', 'Hola... estoy aquí. ¿Cómo estás hoy?');
-    messages.push({ role: 'assistant', content: 'Hola... estoy aquí. ¿Cómo estás hoy?' });
+    appendMessage('lumina', 'こんにちは… ルミナです。今日はどんな一日ですか？');
+    messages.push({ role: 'assistant', content: 'こんにちは… ルミナです。今日はどんな一日ですか？' });
     setEmotion('CURIOSA');
   }, 800);
 }
