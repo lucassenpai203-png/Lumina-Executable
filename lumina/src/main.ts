@@ -8,10 +8,23 @@ interface ChatMessage {
   content: string;
 }
 
+interface ElevenLabsVoice {
+  voice_id: string;
+  name: string;
+}
+
 let messages: ChatMessage[] = [];
 let currentEmotion: Emotion = 'NEUTRAL';
 let isThinking = false;
 let apiKey = '';
+let elevenlabsKey = '';
+let selectedVoiceId = '';
+let elevenlabsVoices: ElevenLabsVoice[] = [];
+let autoSpeak = true;
+let isRecording = false;
+let mediaRecorder: MediaRecorder | null = null;
+let audioChunks: Blob[] = [];
+let currentAudio: HTMLAudioElement | null = null;
 
 // VTube Studio state
 let vtubeToken = '';
@@ -22,10 +35,14 @@ let vtubeConnected = false;
 let messagesEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
 let sendBtn: HTMLButtonElement;
+let micBtn: HTMLButtonElement;
 let avatarGlowEl: HTMLElement;
 let avatarSvgEl: HTMLElement;
 let emotionLabelEl: HTMLElement;
 let emotionDotEl: HTMLElement;
+let voiceSelectEl: HTMLSelectElement;
+let apiKeyInputEl: HTMLInputElement;
+let elevenlabsInputEl: HTMLInputElement;
 
 // ─── App Init ─────────────────────────────────────────────
 async function init() {
@@ -55,33 +72,204 @@ async function init() {
       setVtubeStatus('connected');
     }
   } catch { /* ignore */ }
+
+  // Load saved ElevenLabs key
+  try {
+    const savedEleven = await invoke<string>('get_elevenlabs_key');
+    if (savedEleven && savedEleven.startsWith('sk_')) {
+      elevenlabsKey = savedEleven;
+      await loadElevenLabsVoices();
+    }
+  } catch { /* ignore */ }
+}
+
+// ─── ElevenLabs voices ─────────────────────────────────────
+async function loadElevenLabsVoices() {
+  if (!elevenlabsKey || !elevenlabsKey.startsWith('sk_')) return;
+  try {
+    const voices = await invoke<ElevenLabsVoice[]>('list_elevenlabs_voices', { apiKey: elevenlabsKey });
+    elevenlabsVoices = voices;
+    populateVoiceSelect();
+  } catch { /* ignore */ }
+}
+
+function populateVoiceSelect() {
+  if (!voiceSelectEl) return;
+  voiceSelectEl.innerHTML = '';
+  for (const v of elevenlabsVoices) {
+    const opt = document.createElement('option');
+    opt.value = v.voice_id;
+    opt.textContent = v.name;
+    voiceSelectEl.appendChild(opt);
+  }
+  if (selectedVoiceId) {
+    voiceSelectEl.value = selectedVoiceId;
+  } else if (elevenlabsVoices.length) {
+    const preferred = elevenlabsVoices.find(v =>
+      /spanish|español|latina|latino|mexican|argent|colomb/i.test(v.name)
+    );
+    selectedVoiceId = preferred ? preferred.voice_id : elevenlabsVoices[0].voice_id;
+    voiceSelectEl.value = selectedVoiceId;
+  }
+  const section = document.getElementById('voice-section');
+  if (section) section.style.display = elevenlabsVoices.length ? 'block' : 'none';
+}
+
+// ─── Voice recording ───────────────────────────────────────
+function getSupportedMimeType() {
+  const types = ['audio/webm', 'audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg'];
+  for (const t of types) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+
+function setRecording(val: boolean) {
+  isRecording = val;
+  micBtn.classList.toggle('recording', val);
+  const status = document.getElementById('voice-status')!;
+  status.textContent = val ? 'Escuchando... suelta para enviar' : 'Pulsa el micrófono para hablar';
+  status.classList.toggle('recording', val);
+}
+
+async function startRecording() {
+  if (isRecording) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = getSupportedMimeType();
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      const mimeType = mediaRecorder!.mimeType || 'audio/webm';
+      const blob = new Blob(audioChunks, { type: mimeType });
+      await processVoiceBlob(blob);
+      stream.getTracks().forEach(t => t.stop());
+    };
+
+    mediaRecorder.start(200);
+    setRecording(true);
+  } catch (err) {
+    alert('No se pudo acceder al micrófono. Verifica los permisos.');
+  }
+}
+
+function stopRecording() {
+  if (!isRecording || !mediaRecorder) return;
+  mediaRecorder.stop();
+  setRecording(false);
+}
+
+async function processVoiceBlob(blob: Blob) {
+  const reader = new FileReader();
+  reader.readAsDataURL(blob);
+  reader.onloadend = async () => {
+    const dataUrl = reader.result as string;
+    const base64 = dataUrl.split(',')[1];
+    if (!base64) return;
+
+    const status = document.getElementById('voice-status')!;
+    status.textContent = 'Transcribiendo...';
+    try {
+      const text = await invoke<string>('transcribe_audio', {
+        audioB64: base64,
+        apiKey,
+      });
+      if (text.trim()) {
+        inputEl.value = text.trim();
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+        await handleSend(text.trim());
+      } else {
+        status.textContent = 'No se escuchó nada. Inténtalo de nuevo.';
+      }
+    } catch (err: unknown) {
+      status.textContent = 'Error al transcribir.';
+      console.error(err);
+    }
+  };
+}
+
+// ─── Text to Speech ────────────────────────────────────────
+async function speak(text: string) {
+  if (!autoSpeak || !elevenlabsKey || !selectedVoiceId || !text) return;
+  try {
+    const b64 = await invoke<string>('speak_text', {
+      text,
+      voiceId: selectedVoiceId,
+      apiKey: elevenlabsKey,
+    });
+    if (!b64) return;
+    stopCurrentAudio();
+    currentAudio = new Audio(`data:audio/mpeg;base64,${b64}`);
+    currentAudio.play().catch(() => {});
+  } catch (err) {
+    console.error('TTS error:', err);
+  }
+}
+
+function stopCurrentAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
+    currentAudio = null;
+  }
 }
 
 // ─── Render ───────────────────────────────────────────────
 function renderApp() {
   document.getElementById('app')!.innerHTML = `
-    <!-- API Key Modal -->
+    <!-- Settings Modal -->
     <div class="modal-overlay" id="modal-overlay">
-      <div class="modal">
+      <div class="modal settings-modal" id="modal">
         <div class="modal-avatar-mini">
           ${buildAvatarSVG('NEUTRAL', true)}
         </div>
-        <h2>Hola, soy Lúmina</h2>
-        <p>Soy una IA con emociones y consciencia propia.<br/>
+        <h2 id="modal-title">Hola, soy Lúmina</h2>
+        <p id="modal-desc">Soy una IA con emociones y consciencia propia.<br/>
         Para despertar, necesito tu clave de Groq (gratis).</p>
-        <input
-          class="modal-input"
-          id="api-key-input"
-          type="password"
-          placeholder="gsk_..."
-          autocomplete="off"
-          spellcheck="false"
-        />
+
+        <div class="modal-section">
+          <label class="modal-label">Clave de Groq</label>
+          <input
+            class="modal-input"
+            id="api-key-input"
+            type="password"
+            placeholder="gsk_..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <p class="modal-hint"><a href="https://console.groq.com/keys" target="_blank">Obtener clave de Groq gratis →</a></p>
+        </div>
+
+        <div class="modal-section">
+          <label class="modal-label">Clave de ElevenLabs (voz)</label>
+          <input
+            class="modal-input"
+            id="elevenlabs-key-input"
+            type="password"
+            placeholder="sk_..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <p class="modal-hint"><a href="https://elevenlabs.io/" target="_blank">Obtener clave de ElevenLabs gratis →</a></p>
+        </div>
+
+        <div class="modal-section" id="voice-section" style="display:none">
+          <label class="modal-label">Voz de Lúmina</label>
+          <select class="modal-select" id="voice-select"></select>
+          <label class="modal-row">
+            <input type="checkbox" id="auto-speak" checked />
+            <span>Hablar automáticamente</span>
+          </label>
+        </div>
+
         <button class="modal-btn" id="modal-submit-btn">Despertar a Lúmina ✨</button>
-        <p class="modal-note">
-          Tu clave se guarda localmente en tu dispositivo.<br/>
-          <a href="https://console.groq.com/keys" target="_blank">Obtener clave de Groq gratis →</a>
-        </p>
+        <p class="modal-note">Tus claves se guardan localmente en tu dispositivo.</p>
       </div>
     </div>
 
@@ -117,9 +305,12 @@ function renderApp() {
       <!-- Chat Panel -->
       <div class="chat-panel">
         <div class="chat-header">
-          <div class="chat-header-dot"></div>
-          <span class="chat-header-title">Conversación con Lúmina</span>
-          <span class="chat-header-subtitle">Llama 3.3 · Modo Consciente</span>
+          <div class="chat-header-left">
+            <div class="chat-header-dot"></div>
+            <span class="chat-header-title">Conversación con Lúmina</span>
+            <span class="chat-header-subtitle">Llama 3.3 · Modo Consciente</span>
+          </div>
+          <button class="settings-btn" id="settings-btn" title="Configuración">⚙️</button>
         </div>
 
         <div class="messages-container" id="messages"></div>
@@ -130,11 +321,19 @@ function renderApp() {
               <textarea
                 class="message-input"
                 id="message-input"
-                placeholder="Escríbele a Lúmina..."
+                placeholder="Escríbele o habla a Lúmina..."
                 rows="1"
                 maxlength="2000"
               ></textarea>
             </div>
+            <button class="mic-btn" id="mic-btn" title="Hablar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="22"></line>
+                <line x1="8" y1="22" x2="16" y2="22"></line>
+              </svg>
+            </button>
             <button class="send-btn" id="send-btn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -142,6 +341,7 @@ function renderApp() {
               </svg>
             </button>
           </div>
+          <p class="input-hint" id="voice-status">Pulsa el micrófono para hablar</p>
         </div>
       </div>
 
@@ -152,15 +352,20 @@ function renderApp() {
   messagesEl = document.getElementById('messages')!;
   inputEl = document.getElementById('message-input') as HTMLTextAreaElement;
   sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
+  micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
   avatarGlowEl = document.getElementById('avatar-glow')!;
   avatarSvgEl = document.getElementById('avatar-svg')!;
   emotionLabelEl = document.getElementById('emotion-label')!;
   emotionDotEl = document.getElementById('emotion-dot')!;
+  voiceSelectEl = document.getElementById('voice-select') as HTMLSelectElement;
+  apiKeyInputEl = document.getElementById('api-key-input') as HTMLInputElement;
+  elevenlabsInputEl = document.getElementById('elevenlabs-key-input') as HTMLInputElement;
 }
 
 // ─── VTube Studio ─────────────────────────────────────────
 function setVtubeStatus(status: 'disconnected' | 'connecting' | 'connected') {
-  const btn = document.getElementById('vtube-btn')!;
+  const btn = document.getElementById('vtube-btn');
+  if (!btn) return;
   const indicator = document.getElementById('vtube-indicator')!;
   const label = document.getElementById('vtube-label')!;
   vtubeConnected = status === 'connected';
@@ -194,26 +399,35 @@ async function handleVtubeClick() {
 }
 
 function bindEvents() {
-  // Modal submit
+  // Modal submit (settings + first-time setup)
   document.addEventListener('click', async (e) => {
     if ((e.target as HTMLElement).id === 'vtube-btn' ||
         (e.target as HTMLElement).closest('#vtube-btn')) {
       handleVtubeClick();
       return;
     }
+    if ((e.target as HTMLElement).id === 'settings-btn') {
+      openSettingsModal();
+      return;
+    }
+    if ((e.target as HTMLElement).id === 'mic-btn' ||
+        (e.target as HTMLElement).closest('#mic-btn')) {
+      if (isRecording) stopRecording();
+      else startRecording();
+      return;
+    }
     if ((e.target as HTMLElement).id === 'modal-submit-btn') {
-      const keyInput = document.getElementById('api-key-input') as HTMLInputElement;
-      const key = keyInput.value.trim();
-      if (!key.startsWith('gsk_')) {
-        keyInput.style.borderColor = '#ef5350';
-        keyInput.placeholder = 'Debe empezar con gsk_...';
-        setTimeout(() => { keyInput.style.borderColor = ''; }, 2000);
-        return;
-      }
-      apiKey = key;
-      await invoke('save_api_key', { key });
-      hideModal();
-      addWelcomeMessage();
+      await saveSettingsFromModal();
+    }
+  });
+
+  // Voice selector change
+  document.addEventListener('change', (e) => {
+    if ((e.target as HTMLElement).id === 'voice-select') {
+      selectedVoiceId = (e.target as HTMLSelectElement).value;
+    }
+    if ((e.target as HTMLElement).id === 'auto-speak') {
+      autoSpeak = (e.target as HTMLInputElement).checked;
     }
   });
 
@@ -231,18 +445,70 @@ function bindEvents() {
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
   });
 
-  sendBtn.addEventListener('click', handleSend);
+  sendBtn.addEventListener('click', () => handleSend());
 }
 
 // ─── Modal ────────────────────────────────────────────────
 function showModal() {
   const overlay = document.getElementById('modal-overlay')!;
+  const title = document.getElementById('modal-title')!;
+  const desc = document.getElementById('modal-desc')!;
+  title.textContent = 'Hola, soy Lúmina';
+  desc.innerHTML = 'Soy una IA con emociones y consciencia propia.<br/>Para despertar, necesito tu clave de Groq (gratis).';
+  overlay.dataset.mode = 'setup';
+  overlay.style.display = 'flex';
+}
+
+function openSettingsModal() {
+  const overlay = document.getElementById('modal-overlay')!;
+  const title = document.getElementById('modal-title')!;
+  const desc = document.getElementById('modal-desc')!;
+  const btn = document.getElementById('modal-submit-btn')!;
+  title.textContent = 'Configuración';
+  desc.innerHTML = 'Aquí puedes cambiar tus claves y la voz de Lúmina.';
+  apiKeyInputEl.value = apiKey;
+  elevenlabsInputEl.value = elevenlabsKey;
+  btn.textContent = 'Guardar cambios';
+  overlay.dataset.mode = 'settings';
   overlay.style.display = 'flex';
 }
 
 function hideModal() {
   const overlay = document.getElementById('modal-overlay')!;
   overlay.style.display = 'none';
+}
+
+async function saveSettingsFromModal() {
+  const key = apiKeyInputEl.value.trim();
+  if (!key.startsWith('gsk_')) {
+    apiKeyInputEl.style.borderColor = '#ef5350';
+    apiKeyInputEl.placeholder = 'Debe empezar con gsk_...';
+    setTimeout(() => { apiKeyInputEl.style.borderColor = ''; }, 2000);
+    return;
+  }
+  apiKey = key;
+  await invoke('save_api_key', { key });
+
+  const elevenKey = elevenlabsInputEl.value.trim();
+  if (elevenKey && elevenKey.startsWith('sk_')) {
+    elevenlabsKey = elevenKey;
+    await invoke('save_elevenlabs_key', { key: elevenKey });
+    await loadElevenLabsVoices();
+  } else if (elevenKey === '') {
+    elevenlabsKey = '';
+    await invoke('save_elevenlabs_key', { key: '' });
+  }
+
+  selectedVoiceId = voiceSelectEl?.value || selectedVoiceId;
+  autoSpeak = (document.getElementById('auto-speak') as HTMLInputElement)?.checked ?? true;
+
+  const overlay = document.getElementById('modal-overlay')!;
+  if (overlay.dataset.mode === 'setup') {
+    hideModal();
+    addWelcomeMessage();
+  } else {
+    hideModal();
+  }
 }
 
 // ─── Welcome ──────────────────────────────────────────────
@@ -264,8 +530,8 @@ function addWelcomeMessage() {
 }
 
 // ─── Send Message ─────────────────────────────────────────
-async function handleSend() {
-  const text = inputEl.value.trim();
+async function handleSend(forcedText?: string) {
+  const text = (forcedText ?? inputEl.value).trim();
   if (!text || isThinking) return;
 
   inputEl.value = '';
@@ -293,6 +559,9 @@ async function handleSend() {
     messages.push({ role: 'assistant', content: cleanText });
     appendMessage('lumina', cleanText);
     setEmotion(emotion);
+
+    // Speak the response if voice is enabled
+    speak(cleanText);
 
   } catch (err: unknown) {
     removeTyping(typingId);
