@@ -7,6 +7,8 @@ description: Constraints and patterns when building a Tauri v2 desktop app insid
 
 **Rule:** For free, unlimited, Japanese anime-style TTS in a desktop app, use **VoiceVox** (local engine, port 50021). It is the standard for VTuber/anime voices in Japanese and has no cloud limits. The trade-off is the user must install and run the VoiceVox engine locally.
 
+**Rule:** For free, unlimited, Spanish TTS in a desktop app, use **Edge-TTS** (Microsoft Edge's cloud voices, accessed via WebSocket). No API key is needed. Best voices for a sweet/animated female persona are `es-MX-DaliaNeural` and `es-ES-ElviraNeural`.
+
 **Rule:** The `lumina/` directory is not part of the pnpm workspace (`pnpm-workspace.yaml` only lists `artifacts/*`, `lib/*`, `scripts`). Install its dependencies with:
 
 ```bash
