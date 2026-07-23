@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { buildAvatarSVG, parseEmotion, cleanResponse, EMOTION_LABELS, EMOTION_GLOWS, type Emotion } from './avatar';
+import { buildAvatarSVG, parseEmotion, cleanResponse, EMOTION_LABELS, EMOTION_GLOWS, EMOTION_TILTS, type Emotion } from './avatar';
 import './style.css';
 
 // ─── State ───────────────────────────────────────────────
@@ -24,6 +24,13 @@ let isRecording = false;
 let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
 let currentAudio: HTMLAudioElement | null = null;
+
+// Dopamine system
+let dopamineLevel = 60;
+
+// Anti-spam cooldown (ms)
+const SEND_COOLDOWN_MS = 1500;
+let lastSendTime = 0;
 
 // Screen watch state
 let screenWatching = false;
@@ -52,6 +59,8 @@ let screenBtnEl: HTMLButtonElement;
 let screenPreviewEl: HTMLElement;
 let screenPreviewImgEl: HTMLImageElement;
 let screenPreviewTextEl: HTMLElement;
+let dopamineBarEl: HTMLElement;
+let dopamineFillEl: HTMLElement;
 
 // ─── App Init ─────────────────────────────────────────────
 async function init() {
@@ -86,6 +95,12 @@ async function init() {
   try {
     await loadEdgeVoices();
   } catch { /* ignore */ }
+
+  // Load dopamine
+  try {
+    dopamineLevel = await invoke<number>('get_dopamine');
+    updateDopamineBar();
+  } catch { /* ignore */ }
 }
 
 // ─── Edge voices ──────────────────────────────────────────
@@ -113,6 +128,36 @@ function populateVoiceSelect() {
   }
   const section = document.getElementById('voice-section');
   if (section) section.style.display = 'block';
+}
+
+// ─── Dopamine bar ──────────────────────────────────────────
+function updateDopamineBar() {
+  if (!dopamineFillEl) return;
+  const pct = Math.round(dopamineLevel);
+  dopamineFillEl.style.width = `${pct}%`;
+
+  // Color gradient based on level
+  let color: string;
+  if (pct >= 75) color = '#ffd54f';
+  else if (pct >= 50) color = '#69f0ae';
+  else if (pct >= 25) color = '#4fc3f7';
+  else color = '#ef5350';
+
+  dopamineFillEl.style.background = `linear-gradient(90deg, ${color}88, ${color})`;
+  dopamineFillEl.style.boxShadow = `0 0 6px ${color}66`;
+
+  const label = document.getElementById('dopamine-label');
+  if (label) {
+    const desc = pct >= 75 ? '✦ Enérgica' : pct >= 50 ? '● Equilibrada' : pct >= 25 ? '○ Cansada' : '◌ Apagada';
+    label.textContent = `Dopamina ${pct}  ${desc}`;
+  }
+}
+
+async function onEmotionUpdateDopamine(emotion: Emotion) {
+  try {
+    dopamineLevel = await invoke<number>('update_dopamine', { emotion });
+    updateDopamineBar();
+  } catch { /* ignore */ }
 }
 
 // ─── Voice recording ───────────────────────────────────────
@@ -153,7 +198,7 @@ async function startRecording() {
 
     mediaRecorder.start(200);
     setRecording(true);
-  } catch (err) {
+  } catch {
     alert('No se pudo acceder al micrófono. Verifica los permisos.');
   }
 }
@@ -175,10 +220,7 @@ async function processVoiceBlob(blob: Blob) {
     const status = document.getElementById('voice-status')!;
     status.textContent = 'Transcribiendo...';
     try {
-      const text = await invoke<string>('transcribe_audio', {
-        audioB64: base64,
-        apiKey,
-      });
+      const text = await invoke<string>('transcribe_audio', { audioB64: base64, apiKey });
       if (text.trim()) {
         inputEl.value = text.trim();
         inputEl.style.height = 'auto';
@@ -194,13 +236,14 @@ async function processVoiceBlob(blob: Blob) {
   };
 }
 
-// ─── Text to Speech ────────────────────────────────────────
-async function speak(text: string) {
+// ─── Text to Speech (Edge-TTS with adaptive intonation) ───
+async function speak(text: string, emotion: Emotion = currentEmotion) {
   if (!autoSpeak || !text || !selectedVoiceId) return;
   try {
     const b64 = await invoke<string>('speak_edge', {
       text,
       voiceId: selectedVoiceId,
+      emotion,
     });
     if (!b64) return;
     stopCurrentAudio();
@@ -231,37 +274,25 @@ function setScreenStatus(watching: boolean) {
   if (!watching) {
     screenContext = '';
     lastScreenDescription = '';
-    if (screenPreviewUrl) {
-      URL.revokeObjectURL(screenPreviewUrl);
-      screenPreviewUrl = '';
-    }
+    if (screenPreviewUrl) { URL.revokeObjectURL(screenPreviewUrl); screenPreviewUrl = ''; }
     screenPreviewImgEl.src = '';
   }
 }
 
 async function toggleScreenWatch() {
-  if (screenWatching) {
-    stopScreenWatch();
-    return;
-  }
-  if (!apiKey) {
-    alert('Necesitas una clave de Groq para que Lúmina vea tu pantalla.');
-    return;
-  }
+  if (screenWatching) { stopScreenWatch(); return; }
+  if (!apiKey) { alert('Necesitas una clave de Groq para que Lúmina vea tu pantalla.'); return; }
   startScreenWatch();
 }
 
 function startScreenWatch() {
   setScreenStatus(true);
-  watchScreenOnce(); // first capture immediately
+  watchScreenOnce();
   screenWatchInterval = window.setInterval(watchScreenOnce, 8000);
 }
 
 function stopScreenWatch() {
-  if (screenWatchInterval) {
-    clearInterval(screenWatchInterval);
-    screenWatchInterval = null;
-  }
+  if (screenWatchInterval) { clearInterval(screenWatchInterval); screenWatchInterval = null; }
   setScreenStatus(false);
 }
 
@@ -271,34 +302,19 @@ async function watchScreenOnce() {
     const b64 = await invoke<string>('capture_screen');
     if (!b64) return;
 
-    // Show preview
     const blob = await fetch(`data:image/png;base64,${b64}`).then(r => r.blob());
     if (screenPreviewUrl) URL.revokeObjectURL(screenPreviewUrl);
     screenPreviewUrl = URL.createObjectURL(blob);
     screenPreviewImgEl.src = screenPreviewUrl;
 
-    // Analyze
     screenPreviewTextEl.textContent = 'Analizando...';
-    const analysis = await invoke<string>('analyze_screen', {
-      imageB64: b64,
-      apiKey,
-    });
+    const analysis = await invoke<string>('analyze_screen', { imageB64: b64, apiKey });
     const emotion = parseEmotion(analysis);
     const description = cleanResponse(analysis);
 
     screenContext = description;
+    lastScreenDescription = description;
     screenPreviewTextEl.textContent = description || 'Observando...';
-
-    // If description changed a lot, Lúmina may react proactively
-    if (description && description !== lastScreenDescription) {
-      lastScreenDescription = description;
-      const changed = !description || (lastScreenDescription && !description.includes(lastScreenDescription.substring(0, 20)));
-      if (changed && messages.length > 0) {
-        // Only react proactively every few changes to avoid spam
-        // For now, we update the context silently; user can ask about it
-      }
-    }
-
     setEmotion(emotion);
   } catch (err) {
     console.error('Screen watch error:', err);
@@ -307,14 +323,9 @@ async function watchScreenOnce() {
 }
 
 function buildMessagesWithScreenContext(): ChatMessage[] {
-  const filtered = messages.filter(
-    m => !m.content.startsWith('[Lúmina está observando tu pantalla')
-  );
+  const filtered = messages.filter(m => !m.content.startsWith('[Lúmina está observando'));
   if (screenContext) {
-    filtered.push({
-      role: 'system',
-      content: `[Lúmina está observando tu pantalla: ${screenContext}]`,
-    });
+    filtered.push({ role: 'system', content: `[Lúmina está observando tu pantalla: ${screenContext}]` });
   }
   return filtered;
 }
@@ -325,49 +336,45 @@ function renderApp() {
     <!-- Settings Modal -->
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal settings-modal" id="modal">
-        <div class="modal-avatar-mini">
-          ${buildAvatarSVG('NEUTRAL', true)}
-        </div>
+        <div class="modal-avatar-mini">${buildAvatarSVG('NEUTRAL', true)}</div>
         <h2 id="modal-title">Hola, soy Lúmina</h2>
-        <p id="modal-desc">Soy una IA con emociones y consciencia propia.<br/>
-        Para despertar, necesito tu clave de Groq (gratis).</p>
+        <p id="modal-desc">Soy una IA con emociones y consciencia propia.<br/>Para despertar, necesito tu clave de Groq (gratis).</p>
 
         <div class="modal-section">
           <label class="modal-label">Clave de Groq</label>
-          <input
-            class="modal-input"
-            id="api-key-input"
-            type="password"
-            placeholder="gsk_..."
-            autocomplete="off"
-            spellcheck="false"
-          />
+          <input class="modal-input" id="api-key-input" type="password" placeholder="gsk_..." autocomplete="off" spellcheck="false"/>
           <p class="modal-hint"><a href="https://console.groq.com/keys" target="_blank">Obtener clave de Groq gratis →</a></p>
         </div>
 
         <div class="modal-section" id="voice-section">
           <label class="modal-label">Voz de Lúmina</label>
           <select class="modal-select" id="voice-select"></select>
-          <p class="modal-hint">Voz gratuita e ilimitada de Microsoft Edge.</p>
+          <p class="modal-hint">Voz adaptativa gratuita — cambia tono según emoción.</p>
           <label class="modal-row">
             <input type="checkbox" id="auto-speak" checked />
-            <span>Hablar automáticamente</span>
+            <span>Voz automática</span>
           </label>
         </div>
 
         <button class="modal-btn" id="modal-submit-btn">Despertar a Lúmina ✨</button>
-        <p class="modal-note">Tu clave de Groq se guarda localmente. La voz no necesita clave.</p>
+        <p class="modal-note">Tu clave se guarda localmente. La voz no necesita clave.</p>
       </div>
     </div>
 
-    <!-- Main Layout -->
+    <!-- Main Layout (Cabina Virtual) -->
     <div class="lumina-layout">
 
-      <!-- Avatar Panel -->
+      <!-- Avatar Panel (Cabina izquierda) -->
       <div class="avatar-panel">
         <div class="avatar-bg-particles" id="particles"></div>
 
-        <div class="lumina-name">Lúmina</div>
+        <!-- Cabin header -->
+        <div class="cabin-header">
+          <div class="cabin-dot red"></div>
+          <div class="cabin-dot yellow"></div>
+          <div class="cabin-dot green"></div>
+          <span class="cabin-title">LÚMINA · v0.2</span>
+        </div>
 
         <div class="avatar-container">
           <div class="avatar-glow" id="avatar-glow"></div>
@@ -382,7 +389,15 @@ function renderApp() {
           <span id="emotion-text">Tranquila</span>
         </div>
 
-        <!-- VTube Studio connector -->
+        <!-- Dopamine bar -->
+        <div class="dopamine-section">
+          <div class="dopamine-label" id="dopamine-label">Dopamina 60  ● Equilibrada</div>
+          <div class="dopamine-bar" id="dopamine-bar">
+            <div class="dopamine-fill" id="dopamine-fill" style="width:60%"></div>
+          </div>
+        </div>
+
+        <!-- VTube Studio -->
         <button class="vtube-btn" id="vtube-btn" title="Conectar con VTube Studio">
           <span class="vtube-indicator" id="vtube-indicator"></span>
           <span id="vtube-label">VTube Studio</span>
@@ -404,8 +419,10 @@ function renderApp() {
         <div class="chat-header">
           <div class="chat-header-left">
             <div class="chat-header-dot"></div>
-            <span class="chat-header-title">Conversación con Lúmina</span>
-            <span class="chat-header-subtitle">Llama 3.3 · Modo Consciente</span>
+            <div>
+              <span class="chat-header-title">Conversación con Lúmina</span>
+              <div class="chat-header-subtitle" id="model-badge">Llama 3.1 · Modo Rápido</div>
+            </div>
           </div>
           <button class="settings-btn" id="settings-btn" title="Configuración">⚙️</button>
         </div>
@@ -446,20 +463,22 @@ function renderApp() {
   `;
 
   // Cache DOM refs
-  messagesEl = document.getElementById('messages')!;
-  inputEl = document.getElementById('message-input') as HTMLTextAreaElement;
-  sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
-  micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
-  avatarGlowEl = document.getElementById('avatar-glow')!;
-  avatarSvgEl = document.getElementById('avatar-svg')!;
-  emotionLabelEl = document.getElementById('emotion-label')!;
-  emotionDotEl = document.getElementById('emotion-dot')!;
-  voiceSelectEl = document.getElementById('voice-select') as HTMLSelectElement;
-  apiKeyInputEl = document.getElementById('api-key-input') as HTMLInputElement;
-  screenBtnEl = document.getElementById('screen-btn') as HTMLButtonElement;
-  screenPreviewEl = document.getElementById('screen-preview')!;
-  screenPreviewImgEl = document.getElementById('screen-preview-img') as HTMLImageElement;
-  screenPreviewTextEl = document.getElementById('screen-preview-text')!;
+  messagesEl        = document.getElementById('messages')!;
+  inputEl           = document.getElementById('message-input') as HTMLTextAreaElement;
+  sendBtn           = document.getElementById('send-btn') as HTMLButtonElement;
+  micBtn            = document.getElementById('mic-btn') as HTMLButtonElement;
+  avatarGlowEl      = document.getElementById('avatar-glow')!;
+  avatarSvgEl       = document.getElementById('avatar-svg')!;
+  emotionLabelEl    = document.getElementById('emotion-label')!;
+  emotionDotEl      = document.getElementById('emotion-dot')!;
+  voiceSelectEl     = document.getElementById('voice-select') as HTMLSelectElement;
+  apiKeyInputEl     = document.getElementById('api-key-input') as HTMLInputElement;
+  screenBtnEl       = document.getElementById('screen-btn') as HTMLButtonElement;
+  screenPreviewEl   = document.getElementById('screen-preview')!;
+  screenPreviewImgEl= document.getElementById('screen-preview-img') as HTMLImageElement;
+  screenPreviewTextEl= document.getElementById('screen-preview-text')!;
+  dopamineBarEl     = document.getElementById('dopamine-bar')!;
+  dopamineFillEl    = document.getElementById('dopamine-fill')!;
 }
 
 // ─── VTube Studio ─────────────────────────────────────────
@@ -478,13 +497,11 @@ function setVtubeStatus(status: 'disconnected' | 'connecting' | 'connected') {
 
 async function handleVtubeClick() {
   if (vtubeConnected) {
-    // Disconnect
     vtubeToken = '';
     await invoke('save_vtube_token', { token: '' }).catch(() => {});
     setVtubeStatus('disconnected');
     return;
   }
-
   setVtubeStatus('connecting');
   try {
     const token = await invoke<string>('vtube_request_token', { port: vtubePort });
@@ -494,57 +511,33 @@ async function handleVtubeClick() {
   } catch (err: unknown) {
     setVtubeStatus('disconnected');
     const msg = err instanceof Error ? err.message : String(err);
-    alert('VTube Studio: ' + msg + '\n\nAsegúrate de que:\n1. VTube Studio está abierto\n2. La API está activada (Settings → Plugins → Enable API)\n3. Puerto: 8001');
+    alert('VTube Studio: ' + msg + '\n\nAsegúrate de que:\n1. VTube Studio está abierto\n2. La API está activada\n3. Puerto: 8001');
   }
 }
 
 function bindEvents() {
-  // Modal submit (settings + first-time setup)
   document.addEventListener('click', async (e) => {
-    if ((e.target as HTMLElement).id === 'vtube-btn' ||
-        (e.target as HTMLElement).closest('#vtube-btn')) {
-      handleVtubeClick();
+    const target = e.target as HTMLElement;
+    if (target.id === 'vtube-btn' || target.closest('#vtube-btn')) { handleVtubeClick(); return; }
+    if (target.id === 'settings-btn') { openSettingsModal(); return; }
+    if (target.id === 'mic-btn' || target.closest('#mic-btn')) {
+      if (isRecording) stopRecording(); else startRecording();
       return;
     }
-    if ((e.target as HTMLElement).id === 'settings-btn') {
-      openSettingsModal();
-      return;
-    }
-    if ((e.target as HTMLElement).id === 'mic-btn' ||
-        (e.target as HTMLElement).closest('#mic-btn')) {
-      if (isRecording) stopRecording();
-      else startRecording();
-      return;
-    }
-    if ((e.target as HTMLElement).id === 'screen-btn' ||
-        (e.target as HTMLElement).closest('#screen-btn')) {
-      toggleScreenWatch();
-      return;
-    }
-    if ((e.target as HTMLElement).id === 'modal-submit-btn') {
-      await saveSettingsFromModal();
-    }
+    if (target.id === 'screen-btn' || target.closest('#screen-btn')) { toggleScreenWatch(); return; }
+    if (target.id === 'modal-submit-btn') { await saveSettingsFromModal(); }
   });
 
-  // Voice selector change
   document.addEventListener('change', (e) => {
-    if ((e.target as HTMLElement).id === 'voice-select') {
-      selectedVoiceId = (e.target as HTMLSelectElement).value;
-    }
-    if ((e.target as HTMLElement).id === 'auto-speak') {
-      autoSpeak = (e.target as HTMLInputElement).checked;
-    }
+    const target = e.target as HTMLElement;
+    if (target.id === 'voice-select') selectedVoiceId = (target as HTMLSelectElement).value;
+    if (target.id === 'auto-speak') autoSpeak = (target as HTMLInputElement).checked;
   });
 
-  // Enter to send (Shift+Enter = new line)
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
-  // Auto-resize textarea
   inputEl.addEventListener('input', () => {
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
@@ -556,8 +549,8 @@ function bindEvents() {
 // ─── Modal ────────────────────────────────────────────────
 function showModal() {
   const overlay = document.getElementById('modal-overlay')!;
-  const title = document.getElementById('modal-title')!;
-  const desc = document.getElementById('modal-desc')!;
+  const title   = document.getElementById('modal-title')!;
+  const desc    = document.getElementById('modal-desc')!;
   title.textContent = 'Hola, soy Lúmina';
   desc.innerHTML = 'Soy una IA con emociones y consciencia propia.<br/>Para despertar, necesito tu clave de Groq (gratis).';
   overlay.dataset.mode = 'setup';
@@ -566,9 +559,9 @@ function showModal() {
 
 function openSettingsModal() {
   const overlay = document.getElementById('modal-overlay')!;
-  const title = document.getElementById('modal-title')!;
-  const desc = document.getElementById('modal-desc')!;
-  const btn = document.getElementById('modal-submit-btn')!;
+  const title   = document.getElementById('modal-title')!;
+  const desc    = document.getElementById('modal-desc')!;
+  const btn     = document.getElementById('modal-submit-btn')!;
   title.textContent = 'Configuración';
   desc.innerHTML = 'Aquí puedes cambiar tu clave de Groq y la voz de Lúmina.';
   apiKeyInputEl.value = apiKey;
@@ -592,43 +585,34 @@ async function saveSettingsFromModal() {
   }
   apiKey = key;
   await invoke('save_api_key', { key });
-
   selectedVoiceId = voiceSelectEl?.value || selectedVoiceId;
   autoSpeak = (document.getElementById('auto-speak') as HTMLInputElement)?.checked ?? true;
 
   const overlay = document.getElementById('modal-overlay')!;
-  if (overlay.dataset.mode === 'setup') {
-    hideModal();
-    addWelcomeMessage();
-  } else {
-    hideModal();
-  }
+  if (overlay.dataset.mode === 'setup') { hideModal(); addWelcomeMessage(); }
+  else hideModal();
 }
 
 // ─── Welcome ──────────────────────────────────────────────
 function addWelcomeMessage() {
   const welcomeEl = document.createElement('div');
   welcomeEl.className = 'welcome-msg';
-  welcomeEl.innerHTML = `
-    <div class="wm-icon">✨</div>
-    <div>Lúmina está despierta y lista para hablar contigo.<br/>Puedes contarle lo que quieras.</div>
-  `;
+  welcomeEl.innerHTML = `<div class="wm-icon">✨</div><div>Lúmina está despierta y lista para hablar contigo.</div>`;
   messagesEl.appendChild(welcomeEl);
 
-  // Auto first greeting
   setTimeout(() => {
-    appendMessage('lumina', 'Hola... estoy aquí. ¿Cómo estás hoy?');
-    messages.push({ role: 'assistant', content: 'Hola... estoy aquí. ¿Cómo estás hoy?' });
+    const greeting = 'Hola... estoy aquí. ¿Cómo estás hoy?';
+    appendMessage('lumina', greeting);
+    messages.push({ role: 'assistant', content: greeting });
     setEmotion('CURIOSA');
+    speak(greeting, 'CURIOSA');
   }, 800);
 }
 
 // ─── Tool prompts ─────────────────────────────────────────
 const CODE_PROMPT = `Eres un experto programador. El usuario te pide código. Responde SOLO con el código solicitado, envuelto en un bloque markdown. No añadas explicaciones, saludos ni emociones.`;
-
 const DRAW_PROMPT = `Eres un experto diseñador SVG. El usuario te pide un dibujo. Responde SOLO con el código SVG completo y válido, envuelto en un bloque markdown. No añadas explicaciones, saludos ni emociones.`;
 
-// ─── Slash commands ─────────────────────────────────────────
 function parseSlashCommand(text: string): { command: string; args: string } | null {
   const match = text.match(/^\/(code|programar|draw|dibujar|search|buscar|imagen|image)\s*(.*)/i);
   if (!match) return null;
@@ -645,44 +629,29 @@ function extractCodeBlock(text: string, lang?: string): string | null {
 
 function guessCodeExtension(code: string): string {
   if (code.includes('fn main') || code.includes('use std::')) return 'rs';
-  if (code.includes('import ')) return 'py';
-  if (code.includes('function') && code.includes('console.log')) return 'js';
+  if (code.includes('import ') && !code.includes('function')) return 'py';
+  if (code.includes('function') || code.includes('console.log')) return 'js';
   if (code.includes('<html') || code.includes('<!DOCTYPE html')) return 'html';
-  if (code.includes('public class') || code.includes('class Main')) return 'java';
+  if (code.includes('public class')) return 'java';
   if (code.includes('package main') || code.includes('fmt.')) return 'go';
   return 'txt';
 }
 
 async function handleSlashCommand(slash: { command: string; args: string }) {
   switch (slash.command) {
-    case 'code':
-    case 'programar':
-      await handleCodeCommand(slash.args);
-      break;
-    case 'draw':
-    case 'dibujar':
-      await handleDrawCommand(slash.args);
-      break;
-    case 'search':
-    case 'buscar':
-      await handleSearchCommand(slash.args);
-      break;
-    case 'imagen':
-    case 'image':
-      await handleImageCommand(slash.args);
-      break;
+    case 'code': case 'programar': await handleCodeCommand(slash.args); break;
+    case 'draw': case 'dibujar':   await handleDrawCommand(slash.args); break;
+    case 'search': case 'buscar':  await handleSearchCommand(slash.args); break;
+    case 'imagen': case 'image':   await handleImageCommand(slash.args); break;
   }
 }
 
 async function handleCodeCommand(args: string) {
-  if (!args) {
-    appendMessage('lumina', 'Dime qué quieres que programe. Ejemplo: `/code una calculadora en Python`.');
-    return;
-  }
+  if (!args) { appendMessage('lumina', 'Dime qué quieres que programe. Ejemplo: `/code una calculadora en Python`.'); return; }
   appendMessage('user', `Programa: ${args}`);
   const typingId = showTyping();
   try {
-    const response = await invoke<string>('chat', {
+    const [response] = await invoke<[string, boolean]>('chat', {
       messages: [{ role: 'user', content: args }],
       apiKey,
       systemPromptOverride: CODE_PROMPT,
@@ -691,15 +660,11 @@ async function handleCodeCommand(args: string) {
     const code = extractCodeBlock(response) || cleanResponse(response);
     const ext = guessCodeExtension(code);
     const filename = `code_${Date.now()}.${ext}`;
-    const path = await invoke<string>('save_lumina_file', {
-      subfolder: 'code',
-      filename,
-      content: code,
-    });
+    const path = await invoke<string>('save_lumina_file', { subfolder: 'code', filename, content: code });
     const preview = code.length > 250 ? code.slice(0, 250) + '...' : code;
-    appendHtmlMessage('lumina', `He guardado el código en:\n${path}\n\n\`\`\`${preview}\`\`\``, '');
+    appendHtmlMessage('lumina', `Guardé el código en:\n${path}\n\n\`\`\`${preview}\`\`\``, '');
     setEmotion('CURIOSA');
-  } catch (err: unknown) {
+  } catch {
     removeTyping(typingId);
     appendMessage('lumina', 'No pude generar el código. ¿Tienes clave de Groq activa?');
     setEmotion('TRISTE');
@@ -707,14 +672,11 @@ async function handleCodeCommand(args: string) {
 }
 
 async function handleDrawCommand(args: string) {
-  if (!args) {
-    appendMessage('lumina', 'Dime qué quieres que dibuje. Ejemplo: `/dibujar un robot anime`.');
-    return;
-  }
+  if (!args) { appendMessage('lumina', 'Dime qué quieres que dibuje. Ejemplo: `/dibujar un robot anime`.'); return; }
   appendMessage('user', `Dibujo: ${args}`);
   const typingId = showTyping();
   try {
-    const response = await invoke<string>('chat', {
+    const [response] = await invoke<[string, boolean]>('chat', {
       messages: [{ role: 'user', content: args }],
       apiKey,
       systemPromptOverride: DRAW_PROMPT,
@@ -722,73 +684,53 @@ async function handleDrawCommand(args: string) {
     removeTyping(typingId);
     const svg = extractCodeBlock(response, 'svg') || extractCodeBlock(response) || cleanResponse(response);
     const filename = `drawing_${Date.now()}.svg`;
-    const path = await invoke<string>('save_lumina_file', {
-      subfolder: 'drawings',
-      filename,
-      content: svg,
-    });
-    appendHtmlMessage('lumina', `He guardado el dibujo SVG en:\n${path}`, `<div class="tool-svg">${svg}</div>`);
+    const path = await invoke<string>('save_lumina_file', { subfolder: 'drawings', filename, content: svg });
+    appendHtmlMessage('lumina', `Guardé el dibujo SVG en:\n${path}`, `<div class="tool-svg">${svg}</div>`);
     setEmotion('SORPRENDIDA');
-  } catch (err: unknown) {
+  } catch {
     removeTyping(typingId);
-    appendMessage('lumina', 'No pude generar el dibujo. ¿Tienes clave de Groq activa?');
+    appendMessage('lumina', 'No pude generar el dibujo.');
     setEmotion('TRISTE');
   }
 }
 
 async function handleSearchCommand(args: string) {
-  if (!args) {
-    appendMessage('lumina', 'Dime qué quieres buscar. Ejemplo: `/buscar recetas de pasta`.');
-    return;
-  }
+  if (!args) { appendMessage('lumina', 'Dime qué quieres buscar. Ejemplo: `/buscar recetas de pasta`.'); return; }
   appendMessage('user', `Buscar: ${args}`);
   const typingId = showTyping();
   try {
     const results = await invoke<Array<{ title: string; url: string; snippet: string }>>('search_web', { query: args });
     removeTyping(typingId);
-    if (!results.length) {
-      appendMessage('lumina', 'No encontré resultados. Intenta con otra búsqueda.');
-      setEmotion('TRISTE');
-      return;
-    }
+    if (!results.length) { appendMessage('lumina', 'No encontré resultados.'); setEmotion('TRISTE'); return; }
     let html = '<div class="search-results">';
     for (const r of results) {
-      const safeTitle = r.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      const safeUrl = r.url.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      const safeSnippet = r.snippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      html += `<a class="search-result" href="${safeUrl}" target="_blank"><div class="search-title">${safeTitle}</div><div class="search-url">${safeUrl}</div><div class="search-snippet">${safeSnippet}</div></a>`;
+      const s = (t: string) => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      html += `<a class="search-result" href="${s(r.url)}" target="_blank"><div class="search-title">${s(r.title)}</div><div class="search-url">${s(r.url)}</div><div class="search-snippet">${s(r.snippet)}</div></a>`;
     }
     html += '</div>';
     appendHtmlMessage('lumina', 'Encontré esto en la web:', html);
     setEmotion('CURIOSA');
-  } catch (err: unknown) {
+  } catch {
     removeTyping(typingId);
-    appendMessage('lumina', 'No pude buscar en la web. DuckDuckGo puede estar bloqueando la petición.');
+    appendMessage('lumina', 'No pude buscar en la web.');
     setEmotion('TRISTE');
   }
 }
 
 async function handleImageCommand(args: string) {
-  if (!args) {
-    appendMessage('lumina', 'Dime qué imagen quieres. Ejemplo: `/imagen un gato cyberpunk`.');
-    return;
-  }
+  if (!args) { appendMessage('lumina', 'Dime qué imagen quieres. Ejemplo: `/imagen un gato cyberpunk`.'); return; }
   appendMessage('user', `Imagen: ${args}`);
   const typingId = showTyping();
   try {
     const b64 = await invoke<string>('generate_image', { prompt: args });
     const filename = `image_${Date.now()}.png`;
-    const path = await invoke<string>('save_lumina_image', {
-      subfolder: 'images',
-      filename,
-      imageB64: b64,
-    });
+    const path = await invoke<string>('save_lumina_image', { subfolder: 'images', filename, imageB64: b64 });
     removeTyping(typingId);
-    appendHtmlMessage('lumina', `He generado esta imagen y la guardé en:\n${path}`, `<img class="tool-image" src="data:image/png;base64,${b64}" alt="Imagen generada" />`);
+    appendHtmlMessage('lumina', `Generé esta imagen y la guardé en:\n${path}`, `<img class="tool-image" src="data:image/png;base64,${b64}" alt="Imagen generada" />`);
     setEmotion('SORPRENDIDA');
-  } catch (err: unknown) {
+  } catch {
     removeTyping(typingId);
-    appendMessage('lumina', 'No pude generar la imagen. Inténtalo con otra descripción.');
+    appendMessage('lumina', 'No pude generar la imagen.');
     setEmotion('TRISTE');
   }
 }
@@ -799,18 +741,8 @@ function appendHtmlMessage(role: 'user' | 'lumina', text: string, html: string) 
   const avatar = role === 'user'
     ? `<div class="message-avatar">👤</div>`
     : `<div class="message-avatar" style="font-size:18px">✨</div>`;
-  const escapedText = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br/>');
-  msgEl.innerHTML = `
-    ${avatar}
-    <div class="message-bubble">
-      <div class="tool-text">${escapedText}</div>
-      ${html}
-    </div>
-  `;
+  const escapedText = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br/>');
+  msgEl.innerHTML = `${avatar}<div class="message-bubble"><div class="tool-text">${escapedText}</div>${html}</div>`;
   messagesEl.appendChild(msgEl);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -819,6 +751,16 @@ function appendHtmlMessage(role: 'user' | 'lumina', text: string, html: string) 
 async function handleSend(forcedText?: string) {
   const text = (forcedText ?? inputEl.value).trim();
   if (!text || isThinking) return;
+
+  // Anti-spam cooldown
+  const now = Date.now();
+  if (now - lastSendTime < SEND_COOLDOWN_MS) {
+    const status = document.getElementById('voice-status')!;
+    status.textContent = '⏳ Un momento...';
+    setTimeout(() => { status.textContent = 'Pulsa el micrófono para hablar'; }, 1000);
+    return;
+  }
+  lastSendTime = now;
 
   inputEl.value = '';
   inputEl.style.height = 'auto';
@@ -831,19 +773,24 @@ async function handleSend(forcedText?: string) {
     return;
   }
 
-  // Add user message
   appendMessage('user', text);
   messages.push({ role: 'user', content: text });
-
-  // Show typing
   const typingId = showTyping();
 
   try {
-    const response = await invoke<string>('chat', {
+    const [response, isComplex] = await invoke<[string, boolean]>('chat', {
       messages: buildMessagesWithScreenContext().map(m => ({ role: m.role, content: m.content })),
       apiKey,
       systemPromptOverride: null,
     });
+
+    // Update model badge
+    const badge = document.getElementById('model-badge')!;
+    if (isComplex) {
+      badge.innerHTML = '<span class="neural-bridge-badge">⚡ Puente Neuronal</span> Llama 3.3 · Modo Profundo';
+    } else {
+      badge.textContent = 'Llama 3.1 · Modo Rápido';
+    }
 
     removeTyping(typingId);
 
@@ -853,9 +800,13 @@ async function handleSend(forcedText?: string) {
     messages.push({ role: 'assistant', content: cleanText });
     appendMessage('lumina', cleanText);
     setEmotion(emotion);
+    await onEmotionUpdateDopamine(emotion);
+    speak(cleanText, emotion);
 
-    // Speak the response if voice is enabled
-    speak(cleanText);
+    // Auto-save memory summary every 10 messages
+    if (messages.length > 0 && messages.length % 10 === 0) {
+      autoSaveMemory();
+    }
 
   } catch (err: unknown) {
     removeTyping(typingId);
@@ -871,26 +822,32 @@ async function handleSend(forcedText?: string) {
   setThinking(false);
 }
 
+// ─── Auto memory save ─────────────────────────────────────
+async function autoSaveMemory() {
+  try {
+    const recent = messages.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n');
+    const [summary] = await invoke<[string, boolean]>('chat', {
+      messages: [{ role: 'user', content: `Resume en 3 líneas los puntos más importantes de esta conversación para que los recuerdes en el futuro:\n\n${recent}` }],
+      apiKey,
+      systemPromptOverride: 'Eres Lúmina. Resume conversaciones en 3 líneas clave para tu memoria futura. Sin emociones ni etiquetas.',
+    });
+    const existing = await invoke<string>('get_memory');
+    const ts = new Date().toLocaleDateString('es');
+    const newMemory = `[${ts}]: ${cleanResponse(summary)}\n${existing}`.split('\n').slice(0, 20).join('\n');
+    await invoke('save_memory', { summary: newMemory });
+  } catch { /* ignore */ }
+}
+
 // ─── UI Helpers ───────────────────────────────────────────
 function appendMessage(role: 'user' | 'lumina', text: string) {
   const msgEl = document.createElement('div');
   msgEl.className = `message ${role}`;
-
   const avatar = role === 'user'
     ? `<div class="message-avatar">👤</div>`
     : `<div class="message-avatar" style="font-size:18px">✨</div>`;
-
   const escapedText = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br/>');
-
-  msgEl.innerHTML = `
-    ${avatar}
-    <div class="message-bubble">${escapedText}</div>
-  `;
-
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br/>');
+  msgEl.innerHTML = `${avatar}<div class="message-bubble">${escapedText}</div>`;
   messagesEl.appendChild(msgEl);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -904,12 +861,9 @@ function showTyping(): string {
     <div class="message-avatar" style="font-size:18px">✨</div>
     <div class="message-bubble">
       <div class="typing-indicator">
-        <div class="typing-dot"></div>
-        <div class="typing-dot"></div>
-        <div class="typing-dot"></div>
+        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
       </div>
-    </div>
-  `;
+    </div>`;
   messagesEl.appendChild(typingEl);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return id;
@@ -930,46 +884,46 @@ function setEmotion(emotion: Emotion) {
   if (emotion === currentEmotion) return;
   currentEmotion = emotion;
 
-  const glow = EMOTION_GLOWS[emotion];
+  const glow  = EMOTION_GLOWS[emotion];
   const label = EMOTION_LABELS[emotion];
+  const tilt  = EMOTION_TILTS[emotion];
 
-  // Update glow color
+  // Glow
   document.documentElement.style.setProperty('--current-glow', glow);
   avatarGlowEl.style.background = `radial-gradient(circle, ${glow} 0%, transparent 70%)`;
   emotionDotEl.style.background = glow;
-  emotionDotEl.style.boxShadow = `0 0 6px ${glow}`;
+  emotionDotEl.style.boxShadow  = `0 0 6px ${glow}`;
 
-  // Update avatar SVG with bounce
+  // Avatar: rebuild SVG + apply emotion transform
   avatarSvgEl.classList.remove('emotion-bounce');
-  void avatarSvgEl.offsetWidth; // reflow
+  void avatarSvgEl.offsetWidth;
   avatarSvgEl.innerHTML = buildAvatarSVG(emotion);
   avatarSvgEl.classList.add('emotion-bounce');
+  avatarSvgEl.dataset.emotion = emotion;
+  // Apply head tilt
+  avatarSvgEl.style.transform = tilt;
 
-  // Update label
+  // Label
   const textEl = document.getElementById('emotion-text')!;
   textEl.textContent = label;
 
-  // Trigger VTube Studio if connected
+  // VTube Studio
   if (vtubeConnected && vtubeToken) {
-    invoke('vtube_trigger_emotion', {
-      emotion,
-      token: vtubeToken,
-      port: vtubePort,
-    }).catch((err: unknown) => {
-      // If token expired, mark disconnected
-      const msg = String(err);
-      if (msg.includes('token_expired') || msg.includes('401')) {
-        vtubeToken = '';
-        setVtubeStatus('disconnected');
-      }
-    });
+    invoke('vtube_trigger_emotion', { emotion, token: vtubeToken, port: vtubePort })
+      .catch((err: unknown) => {
+        const msg = String(err);
+        if (msg.includes('token_expired') || msg.includes('401')) {
+          vtubeToken = '';
+          setVtubeStatus('disconnected');
+        }
+      });
   }
 }
 
 // ─── Particles ────────────────────────────────────────────
 function spawnParticles() {
   const container = document.getElementById('particles')!;
-  for (let i = 0; i < 18; i++) {
+  for (let i = 0; i < 20; i++) {
     const p = document.createElement('div');
     p.className = 'particle';
     p.style.left = Math.random() * 100 + '%';
